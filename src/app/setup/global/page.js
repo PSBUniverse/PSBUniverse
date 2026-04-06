@@ -11,8 +11,28 @@ import {
   Alert,
 } from "react-bootstrap";
 import { supabase } from "@/lib/supabase";
+import { createCacheKey, invalidateCacheKeys } from "@/lib/cache/clientCache";
+import { getSupabaseSelectWithCache } from "@/lib/cache/supabaseCache";
 
-function SetupTable({ title, tableName, columns, data, setData, onSave }) {
+const CACHE_NAMESPACE = "psb-universe";
+const CACHE_KEYS = {
+  statuses: createCacheKey("setup", "statuses"),
+  colors: createCacheKey("setup", "colors"),
+  manufacturers: createCacheKey("setup", "manufacturers"),
+  projectsList: createCacheKey("projects", "list"),
+};
+
+function SetupTable({
+  title,
+  tableName,
+  pkColumn,
+  columns,
+  data,
+  onSave,
+  cacheNamespace,
+  cacheKey,
+  invalidateKeys,
+}) {
   const [editing, setEditing] = useState(new Set());
   const [draft, setDraft] = useState([]);
   const [dirty, setDirty] = useState(false);
@@ -87,7 +107,7 @@ function SetupTable({ title, tableName, columns, data, setData, onSave }) {
     const { error: delError } = await supabase
       .from(tableName)
       .delete()
-      .gte("id", 0);
+      .gt(pkColumn, 0);
     if (delError) {
       setMsg("Error: " + delError.message);
       return;
@@ -106,7 +126,13 @@ function SetupTable({ title, tableName, columns, data, setData, onSave }) {
     setEditing(new Set());
     setDirty(false);
     setMsg("Saved!");
-    if (onSave) onSave();
+    const keysToInvalidate = [cacheKey, ...(invalidateKeys || [])].filter(
+      Boolean
+    );
+    if (keysToInvalidate.length > 0) {
+      invalidateCacheKeys(keysToInvalidate, { namespace: cacheNamespace });
+    }
+    if (onSave) onSave({ forceFresh: true });
   };
 
   return (
@@ -203,15 +229,49 @@ export default function GlobalSetupPage() {
   const [colors, setColors] = useState([]);
   const [manufacturers, setManufacturers] = useState([]);
 
-  const loadAll = useCallback(async () => {
-    const [s, c, m] = await Promise.all([
-      supabase.from("gtr_s_statuses").select("*").order("id"),
-      supabase.from("gtr_s_colors").select("*").order("id"),
-      supabase.from("gtr_s_manufacturers").select("*").order("id"),
-    ]);
-    setStatuses(s.data || []);
-    setColors(c.data || []);
-    setManufacturers(m.data || []);
+  const loadAll = useCallback(async (options = {}) => {
+    const forceFresh = Boolean(options.forceFresh);
+
+    try {
+      const [s, c, m] = await Promise.all([
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.statuses,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_statuses",
+            select: "*",
+            orderBy: "status_id",
+          },
+        }),
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.colors,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_colors",
+            select: "*",
+            orderBy: "color_id",
+          },
+        }),
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.manufacturers,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_manufacturers",
+            select: "*",
+            orderBy: "manufacturer_id",
+          },
+        }),
+      ]);
+
+      setStatuses(s.data || []);
+      setColors(c.data || []);
+      setManufacturers(m.data || []);
+    } catch (error) {
+      console.error("Failed to load global setup data", error);
+    }
   }, []);
 
   useEffect(() => {
@@ -240,28 +300,38 @@ export default function GlobalSetupPage() {
         <SetupTable
           title="Status List"
           tableName="gtr_s_statuses"
-          columns={[{ key: "name", label: "Status", type: "text" }]}
+          pkColumn="status_id"
+          cacheNamespace={CACHE_NAMESPACE}
+          cacheKey={CACHE_KEYS.statuses}
+          invalidateKeys={[CACHE_KEYS.projectsList]}
+          columns={[
+            { key: "name", label: "Status", type: "text" },
+            { key: "description", label: "Description", type: "text" },
+          ]}
           data={statuses}
-          setData={setStatuses}
           onSave={loadAll}
         />
         <SetupTable
           title="Color Names"
           tableName="gtr_s_colors"
+          pkColumn="color_id"
+          cacheNamespace={CACHE_NAMESPACE}
+          cacheKey={CACHE_KEYS.colors}
           columns={[{ key: "name", label: "Color Name", type: "text" }]}
           data={colors}
-          setData={setColors}
           onSave={loadAll}
         />
         <SetupTable
           title="Manufacturers"
           tableName="gtr_s_manufacturers"
+          pkColumn="manufacturer_id"
+          cacheNamespace={CACHE_NAMESPACE}
+          cacheKey={CACHE_KEYS.manufacturers}
           columns={[
             { key: "name", label: "Manufacturer Name", type: "text" },
             { key: "rate", label: "Rate", type: "number" },
           ]}
           data={manufacturers}
-          setData={setManufacturers}
           onSave={loadAll}
         />
       </Accordion>

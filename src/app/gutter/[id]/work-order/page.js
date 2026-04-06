@@ -13,6 +13,16 @@ import {
   Alert,
 } from "react-bootstrap";
 import { supabase } from "@/lib/supabase";
+import { createCacheKey } from "@/lib/cache/clientCache";
+import { getSupabaseSelectWithCache } from "@/lib/cache/supabaseCache";
+
+const CACHE_NAMESPACE = "psb-universe";
+const PROJECT_DATA_TTL_MS = 5 * 60 * 1000;
+const CACHE_KEYS = {
+  colors: createCacheKey("setup", "colors"),
+  projectDetail: (projId) => createCacheKey("projects", "detail", projId),
+  projectSides: (projId) => createCacheKey("projects", "sides", projId),
+};
 
 export default function WorkOrderPage({ params }) {
   const { id } = use(params);
@@ -25,22 +35,75 @@ export default function WorkOrderPage({ params }) {
     materials: [],
   });
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
-  const loadData = useCallback(async () => {
-    const { data } = await supabase
-      .from("gtr_t_projects")
-      .select("*")
-      .eq("id", id)
-      .single();
+  const loadData = useCallback(async (options = {}) => {
+    const forceFresh = Boolean(options.forceFresh);
 
-    if (data) {
-      setProject(data.data || data);
-      if (data.data?.workOrder) {
-        setWorkOrder(data.data.workOrder);
+    try {
+      const [projectRes, sidesRes, colorsRes] = await Promise.all([
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.projectDetail(id),
+          namespace: CACHE_NAMESPACE,
+          ttlMs: PROJECT_DATA_TTL_MS,
+          forceFresh,
+          query: {
+            table: "gtr_t_projects",
+            select: "*",
+            filters: [{ column: "proj_id", op: "eq", value: id }],
+            single: true,
+          },
+        }),
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.projectSides(id),
+          namespace: CACHE_NAMESPACE,
+          ttlMs: PROJECT_DATA_TTL_MS,
+          forceFresh,
+          query: {
+            table: "gtr_m_project_sides",
+            select: "*",
+            filters: [{ column: "proj_id", op: "eq", value: id }],
+            orderBy: "side_index",
+          },
+        }),
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.colors,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_colors",
+            select: "color_id, name",
+          },
+        }),
+      ]);
+
+      const header = projectRes.data;
+      if (header) {
+        const colorMap = Object.fromEntries(
+          (colorsRes.data || []).map((c) => [String(c.color_id), c.name])
+        );
+        const sections = (sidesRes.data || []).map((side) => ({
+          color: colorMap[String(side.gutter_color_id)] || "--",
+          sides: side.segments,
+          length: side.length,
+          height: side.height,
+          downspoutQty: side.downspout_qty,
+        }));
+
+        setProject({
+          projId: header.proj_id,
+          customer: header.customer,
+          projectName: header.project_name,
+          projectAddress: header.project_address,
+          date: header.date,
+          sections,
+        });
       }
+    } catch (error) {
+      console.error("Failed to load work-order data", error);
+      setMessage("Error loading work-order data.");
     }
+
     setLoading(false);
   }, [id]);
 
@@ -57,15 +120,9 @@ export default function WorkOrderPage({ params }) {
   };
 
   const saveWorkOrder = async () => {
-    setSaving(true);
-    const projectData = { ...(project || {}), workOrder };
-    const { error } = await supabase
-      .from("gtr_t_projects")
-      .update({ data: projectData, updated_at: new Date().toISOString() })
-      .eq("id", id);
-
-    setMessage(error ? "Error saving: " + error.message : "Work order saved.");
-    setSaving(false);
+    setMessage(
+      "Work-order notes are not persisted yet because this relational schema has no dedicated work-order table/columns."
+    );
   };
 
   if (loading) return <Container className="py-4">Loading...</Container>;
@@ -80,7 +137,7 @@ export default function WorkOrderPage({ params }) {
         <div>
           <h2 className="mb-0">Work Order</h2>
           <p className="text-muted mb-0" style={{ fontSize: "0.85rem" }}>
-            {project.projectName || project.projectId}
+            {project.projectName || project.projId}
           </p>
         </div>
       </div>
@@ -206,8 +263,8 @@ export default function WorkOrderPage({ params }) {
       </Card>
 
       <div className="d-flex gap-2 mb-4">
-        <Button variant="success" onClick={saveWorkOrder} disabled={saving}>
-          {saving ? "Saving..." : "Save Work Order"}
+        <Button variant="success" onClick={saveWorkOrder}>
+          Save Work Order
         </Button>
         <Button variant="outline-secondary" onClick={() => window.print()}>
           Print Work Order

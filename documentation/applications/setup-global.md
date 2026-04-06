@@ -1,0 +1,26 @@
+# Global Setup Application
+
+Route: /setup/global
+
+## Purpose
+
+Manage shared setup/reference tables used across modules.
+
+## Managed Tables
+
+- gtr_s_statuses
+- gtr_s_colors
+- gtr_s_manufacturers
+
+## Behavior
+
+- Editable table rows with inline edit controls.
+- Save strategy clears table and reinserts cleaned draft rows.
+- Numeric fields are normalized to numbers.
+
+## Cache Integration
+
+- Loads each setup dataset through cache-aware select helper.
+- Invalidates table-specific cache key on save.
+- Status updates also invalidate projects:list so gutter list status labels refresh immediately.
+- Forces fresh refetch after save.

@@ -11,8 +11,26 @@ import {
   Alert,
 } from "react-bootstrap";
 import { supabase } from "@/lib/supabase";
+import { createCacheKey, invalidateCacheKeys } from "@/lib/cache/clientCache";
+import { getSupabaseSelectWithCache } from "@/lib/cache/supabaseCache";
 
-function SetupTable({ title, tableName, columns, data, onSave }) {
+const CACHE_NAMESPACE = "psb-universe";
+const CACHE_KEYS = {
+  leafGuards: createCacheKey("setup", "leafGuards"),
+  discounts: createCacheKey("setup", "discounts"),
+  tripRates: createCacheKey("setup", "tripRates"),
+};
+
+function SetupTable({
+  title,
+  tableName,
+  pkColumn,
+  columns,
+  data,
+  onSave,
+  cacheNamespace,
+  cacheKey,
+}) {
   const [editing, setEditing] = useState(new Set());
   const [draft, setDraft] = useState([]);
   const [dirty, setDirty] = useState(false);
@@ -87,7 +105,7 @@ function SetupTable({ title, tableName, columns, data, onSave }) {
     const { error: delError } = await supabase
       .from(tableName)
       .delete()
-      .gte("id", 0);
+      .gt(pkColumn, 0);
     if (delError) {
       setMsg("Error: " + delError.message);
       return;
@@ -106,7 +124,10 @@ function SetupTable({ title, tableName, columns, data, onSave }) {
     setEditing(new Set());
     setDirty(false);
     setMsg("Saved!");
-    if (onSave) onSave();
+    if (cacheKey) {
+      invalidateCacheKeys([cacheKey], { namespace: cacheNamespace });
+    }
+    if (onSave) onSave({ forceFresh: true });
   };
 
   return (
@@ -203,15 +224,48 @@ export default function GutterSetupPage() {
   const [discounts, setDiscounts] = useState([]);
   const [tripFeeRates, setTripFeeRates] = useState([]);
 
-  const loadAll = useCallback(async () => {
-    const [lg, d, tf] = await Promise.all([
-      supabase.from("gtr_s_leaf_guards").select("*").order("id"),
-      supabase.from("gtr_s_discounts").select("*").order("id"),
-      supabase.from("gtr_s_trip_fee_rates").select("*").order("id"),
-    ]);
-    setLeafGuards(lg.data || []);
-    setDiscounts(d.data || []);
-    setTripFeeRates(tf.data || []);
+  const loadAll = useCallback(async (options = {}) => {
+    const forceFresh = Boolean(options.forceFresh);
+
+    try {
+      const [lg, d, tf] = await Promise.all([
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.leafGuards,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_leaf_guards",
+            select: "*",
+            orderBy: "leaf_guard_id",
+          },
+        }),
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.discounts,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_discounts",
+            select: "*",
+            orderBy: "discount_id",
+          },
+        }),
+        getSupabaseSelectWithCache({
+          cacheKey: CACHE_KEYS.tripRates,
+          namespace: CACHE_NAMESPACE,
+          forceFresh,
+          query: {
+            table: "gtr_s_trip_rates",
+            select: "*",
+            orderBy: "trip_id",
+          },
+        }),
+      ]);
+      setLeafGuards(lg.data || []);
+      setDiscounts(d.data || []);
+      setTripFeeRates(tf.data || []);
+    } catch (error) {
+      console.error("Failed to load gutter setup data", error);
+    }
   }, []);
 
   useEffect(() => {
@@ -240,6 +294,9 @@ export default function GutterSetupPage() {
         <SetupTable
           title="Leaf Guard"
           tableName="gtr_s_leaf_guards"
+          pkColumn="leaf_guard_id"
+          cacheNamespace={CACHE_NAMESPACE}
+          cacheKey={CACHE_KEYS.leafGuards}
           columns={[
             { key: "name", label: "Name", type: "text" },
             { key: "price", label: "Price", type: "number" },
@@ -250,8 +307,11 @@ export default function GutterSetupPage() {
         <SetupTable
           title="Discounts"
           tableName="gtr_s_discounts"
+          pkColumn="discount_id"
+          cacheNamespace={CACHE_NAMESPACE}
+          cacheKey={CACHE_KEYS.discounts}
           columns={[
-            { key: "percent", label: "Percent", type: "number" },
+            { key: "percentage", label: "Percent", type: "number" },
             { key: "description", label: "Description", type: "text" },
           ]}
           data={discounts}
@@ -259,9 +319,12 @@ export default function GutterSetupPage() {
         />
         <SetupTable
           title="Trip Fee Rates"
-          tableName="gtr_s_trip_fee_rates"
+          tableName="gtr_s_trip_rates"
+          pkColumn="trip_id"
+          cacheNamespace={CACHE_NAMESPACE}
+          cacheKey={CACHE_KEYS.tripRates}
           columns={[
-            { key: "trip", label: "Trip", type: "text" },
+            { key: "label", label: "Trip", type: "text" },
             { key: "rate", label: "Rate", type: "number" },
           ]}
           data={tripFeeRates}

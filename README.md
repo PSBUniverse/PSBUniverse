@@ -22,6 +22,25 @@ You can start editing the page by modifying `src/app/page.js`. The page auto-upd
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Documentation
+
+Project documentation is available in the [`documentation/`](documentation/) folder.
+
+- [Documentation Index](documentation/README.md)
+- [Project Overview](documentation/project-overview.md)
+- [Getting Started](documentation/getting-started.md)
+- [Platform Architecture](documentation/platform/architecture.md)
+- [Data Model](documentation/platform/data-model.md)
+- [Gutter Application](documentation/applications/gutter.md)
+- [Setup Global Application](documentation/applications/setup-global.md)
+- [Setup Gutter Application](documentation/applications/setup-gutter.md)
+- [Company Profile Application](documentation/applications/company-profile.md)
+- [Home Application](documentation/applications/home.md)
+- [OHD and Travel Application](documentation/applications/ohd-and-travel.md)
+- [Libraries: Cache Layer](documentation/libraries/cache-layer.md)
+- [Libraries: Supabase Client](documentation/libraries/supabase-client.md)
+- [Libraries: Pricing Engine](documentation/libraries/pricing-engine.md)
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

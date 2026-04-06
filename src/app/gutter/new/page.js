@@ -15,9 +15,31 @@ import {
 } from "react-bootstrap";
 import { supabase } from "@/lib/supabase";
 import { calculateQuote } from "@/lib/pricingEngine";
+import {
+  createCacheKey,
+  invalidateCacheKeys,
+} from "@/lib/cache/clientCache";
+import { getSupabaseSelectWithCache } from "@/lib/cache/supabaseCache";
 
-const emptySection = () => ({ color: "", sides: "", length: "", height: "", downspoutQty: "" });
+const emptySection = () => ({ colorId: "", sides: "", length: "", height: "", downspoutQty: "" });
 const emptyExtra = () => ({ description: "", qty: "", unitPrice: "" });
+const MIN_DYNAMIC_SIDE_ROWS = 1;
+const MAX_DYNAMIC_SIDE_ROWS = 10;
+const MIN_SIDE_OR_DS_QTY = 1;
+const MAX_SIDE_OR_DS_QTY = 10;
+const CACHE_NAMESPACE = "psb-universe";
+const CACHE_KEYS = {
+  statuses: createCacheKey("setup", "statuses"),
+  colors: createCacheKey("setup", "colors"),
+  manufacturers: createCacheKey("setup", "manufacturers"),
+  leafGuards: createCacheKey("setup", "leafGuards"),
+  tripRates: createCacheKey("setup", "tripRates"),
+  discounts: createCacheKey("setup", "discounts"),
+  projectList: createCacheKey("projects", "list"),
+  projectDetail: (projId) => createCacheKey("projects", "detail", projId),
+  projectSides: (projId) => createCacheKey("projects", "sides", projId),
+  projectExtras: (projId) => createCacheKey("projects", "extras", projId),
+};
 
 export default function GutterProjectNewPage() {
   const router = useRouter();
@@ -31,73 +53,141 @@ export default function GutterProjectNewPage() {
   const [discounts, setDiscounts] = useState([]);
 
   const [project, setProject] = useState({
-    projectId: crypto.randomUUID(),
-    status: "",
+    projId: null,
+    statusId: "",
     requestLink: "",
     customer: "",
     date: "",
     projectName: "",
     projectAddress: "",
-    manufacturer: "",
+    manufacturerId: "",
     manualManufacturerRateEnabled: false,
     manualManufacturerRate: "",
-    tripFeeKey: "",
+    tripId: "",
     manualTripRateEnabled: false,
     manualTripRate: "",
     tripHours: "",
     tripHourlyRate: "",
     sections: [emptySection()],
     leafGuardIncluded: false,
-    leafGuard: "",
+    leafGuardId: "",
     manualLeafGuardRateEnabled: false,
     manualLeafGuardRate: "",
     extrasIncluded: false,
     extras: [emptyExtra()],
     discountIncluded: false,
+    discountId: "",
+    manualDiscountRateEnabled: false,
+    manualDiscountPercent: "",
     discountPercent: "",
     downspoutUnitPrice: "",
     downspoutPipeLength: "",
     hangerRate: "",
     endCapUnitPrice: "",
-    rightEndCaps1: "",
-    rightEndCaps2: "",
-    leftEndCaps1: "",
-    leftEndCaps2: "",
-    depositAmount: "",
+    depositPercent: "",
   });
 
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
-  const loadSetupData = useCallback(async () => {
-    const [statusRes, colorRes, mfgRes, lgRes, tfRes, discRes] =
-      await Promise.all([
-        supabase.from("gtr_s_statuses").select("*").order("id"),
-        supabase.from("gtr_s_colors").select("*").order("id"),
-        supabase.from("gtr_s_manufacturers").select("*").order("id"),
-        supabase.from("gtr_s_leaf_guards").select("*").order("id"),
-        supabase.from("gtr_s_trip_fee_rates").select("*").order("id"),
-        supabase.from("gtr_s_discounts").select("*").order("id"),
-      ]);
+  const loadSetupData = useCallback(async (options = {}) => {
+    const forceFresh = Boolean(options.forceFresh);
 
-    const s = statusRes.data || [];
-    const c = colorRes.data || [];
-    const m = mfgRes.data || [];
-    const lg = lgRes.data || [];
-    const tf = tfRes.data || [];
-    const d = discRes.data || [];
+    try {
+      const [statusRes, colorRes, mfgRes, lgRes, tfRes, discRes] =
+        await Promise.all([
+          getSupabaseSelectWithCache({
+            cacheKey: CACHE_KEYS.statuses,
+            namespace: CACHE_NAMESPACE,
+            forceFresh,
+            query: {
+              table: "gtr_s_statuses",
+              select: "*",
+              orderBy: "status_id",
+            },
+          }),
+          getSupabaseSelectWithCache({
+            cacheKey: CACHE_KEYS.colors,
+            namespace: CACHE_NAMESPACE,
+            forceFresh,
+            query: {
+              table: "gtr_s_colors",
+              select: "*",
+              orderBy: "color_id",
+            },
+          }),
+          getSupabaseSelectWithCache({
+            cacheKey: CACHE_KEYS.manufacturers,
+            namespace: CACHE_NAMESPACE,
+            forceFresh,
+            query: {
+              table: "gtr_s_manufacturers",
+              select: "*",
+              orderBy: "manufacturer_id",
+            },
+          }),
+          getSupabaseSelectWithCache({
+            cacheKey: CACHE_KEYS.leafGuards,
+            namespace: CACHE_NAMESPACE,
+            forceFresh,
+            query: {
+              table: "gtr_s_leaf_guards",
+              select: "*",
+              orderBy: "leaf_guard_id",
+            },
+          }),
+          getSupabaseSelectWithCache({
+            cacheKey: CACHE_KEYS.tripRates,
+            namespace: CACHE_NAMESPACE,
+            forceFresh,
+            query: {
+              table: "gtr_s_trip_rates",
+              select: "*",
+              orderBy: "trip_id",
+            },
+          }),
+          getSupabaseSelectWithCache({
+            cacheKey: CACHE_KEYS.discounts,
+            namespace: CACHE_NAMESPACE,
+            forceFresh,
+            query: {
+              table: "gtr_s_discounts",
+              select: "*",
+              orderBy: "discount_id",
+            },
+          }),
+        ]);
 
-    setStatuses(s);
-    setColors(c);
-    setManufacturers(m);
-    setLeafGuards(lg);
-    setTripFeeRates(tf);
-    setDiscounts(d);
-    setSetup({
-      materialManufacturer: m.map((r) => ({ name: r.name, rate: r.rate })),
-      leafGuard: lg.map((r) => ({ name: r.name, price: r.price })),
-      tripFeeRates: tf.map((r) => ({ trip: r.trip, rate: r.rate })),
-    });
+      const s = statusRes.data || [];
+      const c = colorRes.data || [];
+      const m = mfgRes.data || [];
+      const lg = lgRes.data || [];
+      const tf = tfRes.data || [];
+      const d = discRes.data || [];
+
+      setStatuses(s);
+      setColors(c);
+      setManufacturers(m);
+      setLeafGuards(lg);
+      setTripFeeRates(tf);
+      setDiscounts(d);
+      setSetup({
+        materialManufacturer: m.map((r) => ({ id: r.manufacturer_id, name: r.name, rate: r.rate })),
+        leafGuard: lg.map((r) => ({ id: r.leaf_guard_id, name: r.name, price: r.price })),
+        tripRates: tf.map((r) => ({ id: r.trip_id, label: r.label, rate: r.rate })),
+        discounts: d.map((r) => ({ id: r.discount_id, percent: r.percentage })),
+      });
+
+      setProject((prev) => ({
+        ...prev,
+        statusId: prev.statusId || String(s[0]?.status_id || ""),
+        manufacturerId: prev.manufacturerId || String(m[0]?.manufacturer_id || ""),
+        tripId: prev.tripId || String(tf[0]?.trip_id || ""),
+      }));
+    } catch (error) {
+      console.error("Failed to load setup data", error);
+      setMessage("Error loading setup data.");
+    }
   }, []);
 
   useEffect(() => {
@@ -112,6 +202,14 @@ export default function GutterProjectNewPage() {
     setProject((prev) => ({ ...prev, [field]: value }));
   };
 
+  const normalizeBoundedInt = (value, min, max) => {
+    if (value === "") return "";
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return "";
+    const normalized = Math.trunc(parsed);
+    return String(Math.min(max, Math.max(min, normalized)));
+  };
+
   const updateSection = (index, field, value) => {
     setProject((prev) => {
       const sections = [...prev.sections];
@@ -121,7 +219,7 @@ export default function GutterProjectNewPage() {
   };
 
   const addSection = () => {
-    if (project.sections.length >= 4) return;
+    if (project.sections.length >= MAX_DYNAMIC_SIDE_ROWS) return;
     setProject((prev) => ({
       ...prev,
       sections: [...prev.sections, emptySection()],
@@ -131,7 +229,10 @@ export default function GutterProjectNewPage() {
   const removeSection = (index) => {
     setProject((prev) => ({
       ...prev,
-      sections: prev.sections.filter((_, i) => i !== index),
+      sections:
+        prev.sections.length <= MIN_DYNAMIC_SIDE_ROWS
+          ? prev.sections
+          : prev.sections.filter((_, i) => i !== index),
     }));
   };
 
@@ -166,35 +267,177 @@ export default function GutterProjectNewPage() {
   }, [project, setup]);
 
   const saveProject = async () => {
+    const toIntOrNull = (value) => {
+      if (value === "" || value === null || value === undefined) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+    };
+
+    const toNumOrNull = (value) => {
+      if (value === "" || value === null || value === undefined) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    if (!project.statusId || !project.manufacturerId || !project.tripId) {
+      setMessage("Please select Status, Manufacturer, and Trip Rate before saving.");
+      return;
+    }
+
+    if (project.leafGuardIncluded && !project.leafGuardId) {
+      setMessage("Please select a Leaf Guard reference when Leaf Guard is included.");
+      return;
+    }
+
+    if (project.discountIncluded && !project.discountId) {
+      setMessage("Please select a Discount reference when Discount is included.");
+      return;
+    }
+
     setSaving(true);
     setMessage("");
     const now = new Date().toISOString();
-    const payload = {
-      project_id: project.projectId,
+    const headerPayload = {
       project_name: project.projectName,
       customer: project.customer,
-      status: project.status || "In Progress",
-      date: project.date,
-      request_link: project.requestLink,
       project_address: project.projectAddress,
-      data: project,
+      status_id: toIntOrNull(project.statusId),
+      date: project.date || null,
+      trip_id: toIntOrNull(project.tripId),
+      manufacturer_id: toIntOrNull(project.manufacturerId),
+      discount_id: project.discountIncluded ? toIntOrNull(project.discountId) : null,
+      request_link: project.requestLink,
+      leaf_guard_id: project.leafGuardIncluded ? toIntOrNull(project.leafGuardId) : null,
+      cstm_trip_rate: project.manualTripRateEnabled ? toNumOrNull(project.manualTripRate) : null,
+      cstm_manufacturer_rate: project.manualManufacturerRateEnabled
+        ? toNumOrNull(project.manualManufacturerRate)
+        : null,
+      cstm_discount_percentage: project.manualDiscountRateEnabled
+        ? toNumOrNull(project.manualDiscountPercent)
+        : null,
+      cstm_leaf_guard_price: project.manualLeafGuardRateEnabled
+        ? toNumOrNull(project.manualLeafGuardRate)
+        : null,
+      deposit_percent: toNumOrNull(project.depositPercent),
       updated_at: now,
     };
 
-    const { error } = await supabase.from("gtr_t_projects").upsert(payload, {
-      onConflict: "project_id",
-    });
+    const { data: insertedProject, error: headerError } = await supabase
+      .from("gtr_t_projects")
+      .insert(headerPayload)
+      .select("proj_id")
+      .single();
 
-    if (error) {
-      setMessage("Error saving: " + error.message);
-    } else {
-      setMessage("Project saved.");
+    if (headerError || !insertedProject?.proj_id) {
+      setMessage("Error saving project header: " + (headerError?.message || "Unknown error"));
+      setSaving(false);
+      return;
     }
+
+    const projId = insertedProject.proj_id;
+
+    const sideRows = (project.sections || [])
+      .map((section, index) => {
+        const segments = toIntOrNull(section.sides);
+        const length = toNumOrNull(section.length);
+        const height = toNumOrNull(section.height);
+        const downspoutQty = toIntOrNull(section.downspoutQty);
+        const colorId = toIntOrNull(section.colorId);
+        const hasAnyValue =
+          segments !== null ||
+          length !== null ||
+          height !== null ||
+          downspoutQty !== null ||
+          colorId !== null;
+
+        if (!hasAnyValue) return null;
+
+        return {
+          proj_id: projId,
+          side_index: index + 1,
+          segments,
+          length,
+          height,
+          downspout_qty: downspoutQty,
+          gutter_color_id: colorId,
+          downspout_color_id: colorId,
+        };
+      })
+      .filter(Boolean);
+
+    if (sideRows.length > 0) {
+      const { error: sidesError } = await supabase
+        .from("gtr_m_project_sides")
+        .insert(sideRows);
+
+      if (sidesError) {
+        await supabase.from("gtr_t_projects").delete().eq("proj_id", projId);
+        setMessage("Error saving project sides: " + sidesError.message);
+        setSaving(false);
+        return;
+      }
+    }
+
+    const extraRows = project.extrasIncluded
+      ? (project.extras || [])
+          .map((extra) => {
+            const quantity = toIntOrNull(extra.qty);
+            const unitPrice = toNumOrNull(extra.unitPrice);
+            const name = String(extra.description || "").trim();
+            const hasAnyValue = name !== "" || quantity !== null || unitPrice !== null;
+            if (!hasAnyValue) return null;
+            return {
+              proj_id: projId,
+              name,
+              quantity,
+              unit_price: unitPrice,
+            };
+          })
+          .filter(Boolean)
+      : [];
+
+    if (extraRows.length > 0) {
+      const { error: extrasError } = await supabase
+        .from("gtr_m_project_extras")
+        .insert(extraRows);
+
+      if (extrasError) {
+        await supabase.from("gtr_m_project_sides").delete().eq("proj_id", projId);
+        await supabase.from("gtr_t_projects").delete().eq("proj_id", projId);
+        setMessage("Error saving project extras: " + extrasError.message);
+        setSaving(false);
+        return;
+      }
+    }
+
+    setProject((prev) => ({ ...prev, projId }));
+    invalidateCacheKeys(
+      [
+        CACHE_KEYS.projectList,
+        CACHE_KEYS.projectDetail(projId),
+        CACHE_KEYS.projectSides(projId),
+        CACHE_KEYS.projectExtras(projId),
+      ],
+      { namespace: CACHE_NAMESPACE }
+    );
+    setMessage("Project saved.");
     setSaving(false);
+    router.push(`/gutter/${projId}`);
   };
 
   const fmt = (n) =>
     typeof n === "number" ? n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--";
+
+  const fmtQty = (n) =>
+    typeof n === "number"
+      ? n.toLocaleString("en-US", {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 2,
+        })
+      : "--";
+
+  const derivedEndCaps = quoteResult?.pricing?.derivedEndCaps;
+  const derivedEndCapGroups = derivedEndCaps?.groups || [];
 
   return (
     <Container className="py-4" style={{ maxWidth: 1100 }}>
@@ -229,7 +472,11 @@ export default function GutterProjectNewPage() {
                 <Col md={6}>
                   <Form.Group>
                     <Form.Label className="small">Project ID</Form.Label>
-                    <Form.Control size="sm" value={project.projectId} readOnly />
+                    <Form.Control
+                      size="sm"
+                      value={project.projId ? String(project.projId) : "Auto-generated on save"}
+                      readOnly
+                    />
                   </Form.Group>
                 </Col>
                 <Col md={6}>
@@ -237,12 +484,12 @@ export default function GutterProjectNewPage() {
                     <Form.Label className="small">Status</Form.Label>
                     <Form.Select
                       size="sm"
-                      value={project.status}
-                      onChange={(e) => updateField("status", e.target.value)}
+                      value={project.statusId}
+                      onChange={(e) => updateField("statusId", e.target.value)}
                     >
                       <option value="">Select status...</option>
                       {statuses.map((s) => (
-                        <option key={s.id} value={s.name}>
+                        <option key={s.status_id} value={String(s.status_id)}>
                           {s.name}
                         </option>
                       ))}
@@ -321,14 +568,14 @@ export default function GutterProjectNewPage() {
                     <Form.Label className="small">Manufacturer</Form.Label>
                     <Form.Select
                       size="sm"
-                      value={project.manufacturer}
+                      value={project.manufacturerId}
                       onChange={(e) =>
-                        updateField("manufacturer", e.target.value)
+                        updateField("manufacturerId", e.target.value)
                       }
                     >
                       <option value="">Select manufacturer...</option>
                       {manufacturers.map((m) => (
-                        <option key={m.id} value={m.name}>
+                        <option key={m.manufacturer_id} value={String(m.manufacturer_id)}>
                           {m.name} (${m.rate}/lf)
                         </option>
                       ))}
@@ -368,15 +615,15 @@ export default function GutterProjectNewPage() {
                     <Form.Label className="small">Trip Fee</Form.Label>
                     <Form.Select
                       size="sm"
-                      value={project.tripFeeKey}
+                      value={project.tripId}
                       onChange={(e) =>
-                        updateField("tripFeeKey", e.target.value)
+                        updateField("tripId", e.target.value)
                       }
                     >
                       <option value="">Select trip fee...</option>
                       {tripFeeRates.map((t) => (
-                        <option key={t.id} value={t.trip}>
-                          {t.trip} (${t.rate})
+                        <option key={t.trip_id} value={String(t.trip_id)}>
+                          {t.label} (${t.rate})
                         </option>
                       ))}
                     </Form.Select>
@@ -442,13 +689,13 @@ export default function GutterProjectNewPage() {
           <Card className="mb-3">
             <Card.Header className="d-flex justify-content-between align-items-center">
               <span className="fw-bold">
-                Gutter Sections ({project.sections.length}/4)
+                Gutter Sections ({project.sections.length}/{MAX_DYNAMIC_SIDE_ROWS})
               </span>
               <Button
                 variant="outline-primary"
                 size="sm"
                 onClick={addSection}
-                disabled={project.sections.length >= 4}
+                disabled={project.sections.length >= MAX_DYNAMIC_SIDE_ROWS}
               >
                 + Add Section
               </Button>
@@ -461,15 +708,14 @@ export default function GutterProjectNewPage() {
                 >
                   <div className="d-flex justify-content-between align-items-center mb-2">
                     <strong className="small">Section #{i + 1}</strong>
-                    {project.sections.length > 1 && (
-                      <Button
-                        variant="outline-danger"
-                        size="sm"
-                        onClick={() => removeSection(i)}
-                      >
-                        Remove
-                      </Button>
-                    )}
+                    <Button
+                      variant="outline-danger"
+                      size="sm"
+                      disabled={project.sections.length <= MIN_DYNAMIC_SIDE_ROWS}
+                      onClick={() => removeSection(i)}
+                    >
+                      Remove
+                    </Button>
                   </div>
                   <Row className="g-2">
                     <Col md={3}>
@@ -477,14 +723,14 @@ export default function GutterProjectNewPage() {
                         <Form.Label className="small">Color</Form.Label>
                         <Form.Select
                           size="sm"
-                          value={section.color}
+                          value={section.colorId}
                           onChange={(e) =>
-                            updateSection(i, "color", e.target.value)
+                            updateSection(i, "colorId", e.target.value)
                           }
                         >
                           <option value="">Select...</option>
                           {colors.map((c) => (
-                            <option key={c.id} value={c.name}>
+                            <option key={c.color_id} value={String(c.color_id)}>
                               {c.name}
                             </option>
                           ))}
@@ -497,9 +743,20 @@ export default function GutterProjectNewPage() {
                         <Form.Control
                           size="sm"
                           type="number"
+                          min={MIN_SIDE_OR_DS_QTY}
+                          max={MAX_SIDE_OR_DS_QTY}
+                          step="1"
                           value={section.sides}
                           onChange={(e) =>
-                            updateSection(i, "sides", e.target.value)
+                            updateSection(
+                              i,
+                              "sides",
+                              normalizeBoundedInt(
+                                e.target.value,
+                                MIN_SIDE_OR_DS_QTY,
+                                MAX_SIDE_OR_DS_QTY
+                              )
+                            )
                           }
                         />
                       </Form.Group>
@@ -538,9 +795,20 @@ export default function GutterProjectNewPage() {
                         <Form.Control
                           size="sm"
                           type="number"
+                          min={MIN_SIDE_OR_DS_QTY}
+                          max={MAX_SIDE_OR_DS_QTY}
+                          step="1"
                           value={section.downspoutQty}
                           onChange={(e) =>
-                            updateSection(i, "downspoutQty", e.target.value)
+                            updateSection(
+                              i,
+                              "downspoutQty",
+                              normalizeBoundedInt(
+                                e.target.value,
+                                MIN_SIDE_OR_DS_QTY,
+                                MAX_SIDE_OR_DS_QTY
+                              )
+                            )
                           }
                         />
                       </Form.Group>
@@ -611,57 +879,26 @@ export default function GutterProjectNewPage() {
                     />
                   </Form.Group>
                 </Col>
-                <Col md={2}>
-                  <Form.Group>
-                    <Form.Label className="small">R End Caps 1</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      type="number"
-                      value={project.rightEndCaps1}
-                      onChange={(e) =>
-                        updateField("rightEndCaps1", e.target.value)
-                      }
-                    />
-                  </Form.Group>
-                </Col>
-                <Col md={2}>
-                  <Form.Group>
-                    <Form.Label className="small">R End Caps 2</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      type="number"
-                      value={project.rightEndCaps2}
-                      onChange={(e) =>
-                        updateField("rightEndCaps2", e.target.value)
-                      }
-                    />
-                  </Form.Group>
-                </Col>
-                <Col md={2}>
-                  <Form.Group>
-                    <Form.Label className="small">L End Caps 1</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      type="number"
-                      value={project.leftEndCaps1}
-                      onChange={(e) =>
-                        updateField("leftEndCaps1", e.target.value)
-                      }
-                    />
-                  </Form.Group>
-                </Col>
-                <Col md={2}>
-                  <Form.Group>
-                    <Form.Label className="small">L End Caps 2</Form.Label>
-                    <Form.Control
-                      size="sm"
-                      type="number"
-                      value={project.leftEndCaps2}
-                      onChange={(e) =>
-                        updateField("leftEndCaps2", e.target.value)
-                      }
-                    />
-                  </Form.Group>
+                {derivedEndCapGroups.map((group) => (
+                  <Col md={4} key={group.index}>
+                    <Form.Group>
+                      <Form.Label className="small">
+                        {`End Caps Group ${group.index} (S${group.fromSide}${
+                          group.toSide > group.fromSide ? `+S${group.toSide}` : ""
+                        })`}
+                      </Form.Label>
+                      <Form.Control
+                        size="sm"
+                        readOnly
+                        value={fmtQty(group.value)}
+                      />
+                    </Form.Group>
+                  </Col>
+                ))}
+                <Col md={12}>
+                  <small className="text-muted">
+                    End caps are calculated from side pairs: (S1+S2), (S3+S4), (S5+S6), etc.
+                  </small>
                 </Col>
               </Row>
             </Card.Body>
@@ -683,14 +920,14 @@ export default function GutterProjectNewPage() {
                   <Col md={5}>
                     <Form.Select
                       size="sm"
-                      value={project.leafGuard}
+                      value={project.leafGuardId}
                       onChange={(e) =>
-                        updateField("leafGuard", e.target.value)
+                        updateField("leafGuardId", e.target.value)
                       }
                     >
                       <option value="">Select leaf guard...</option>
                       {leafGuards.map((lg) => (
-                        <option key={lg.id} value={lg.name}>
+                        <option key={lg.leaf_guard_id} value={String(lg.leaf_guard_id)}>
                           {lg.name} (${lg.price}/lf)
                         </option>
                       ))}
@@ -802,29 +1039,57 @@ export default function GutterProjectNewPage() {
               />
               {project.discountIncluded && (
                 <Row className="g-2">
-                  <Col md={4}>
+                  <Col md={6}>
                     <Form.Group>
-                      <Form.Label className="small">
-                        Discount % (0-1)
-                      </Form.Label>
+                      <Form.Label className="small">Discount</Form.Label>
+                      <Form.Select
+                        size="sm"
+                        value={project.discountId}
+                        onChange={(e) =>
+                          updateField("discountId", e.target.value)
+                        }
+                      >
+                        <option value="">Select discount...</option>
+                        {discounts.map((d) => (
+                          <option key={d.discount_id} value={String(d.discount_id)}>
+                            {(Number(d.percentage || 0) * 100).toFixed(0)}% - {d.description}
+                          </option>
+                        ))}
+                      </Form.Select>
+                    </Form.Group>
+                  </Col>
+                  <Col md={3}>
+                    <Form.Check
+                      className="mt-4"
+                      label="Manual Discount %"
+                      checked={project.manualDiscountRateEnabled}
+                      onChange={(e) =>
+                        updateField("manualDiscountRateEnabled", e.target.checked)
+                      }
+                    />
+                  </Col>
+                  <Col md={3}>
+                    <Form.Group>
+                      <Form.Label className="small">Manual % (0-1)</Form.Label>
                       <Form.Control
                         size="sm"
                         type="number"
-                        step="0.01"
+                        step="0.0001"
                         min="0"
                         max="1"
-                        value={project.discountPercent}
+                        disabled={!project.manualDiscountRateEnabled}
+                        value={project.manualDiscountPercent}
                         onChange={(e) =>
-                          updateField("discountPercent", e.target.value)
+                          updateField("manualDiscountPercent", e.target.value)
                         }
                       />
                     </Form.Group>
                   </Col>
-                  <Col md={8}>
+                  <Col md={6}>
                     <div className="mt-3">
                       {discounts.map((d) => (
-                        <small key={d.id} className="d-block text-muted">
-                          {(d.percent * 100).toFixed(0)}% — {d.description}
+                        <small key={d.discount_id} className="d-block text-muted">
+                          {(Number(d.percentage || 0) * 100).toFixed(0)}% - {d.description}
                         </small>
                       ))}
                     </div>
@@ -833,14 +1098,16 @@ export default function GutterProjectNewPage() {
               )}
 
               <Form.Group className="mt-3">
-                <Form.Label className="small">Deposit Amount</Form.Label>
+                <Form.Label className="small">Deposit (%)</Form.Label>
                 <Form.Control
                   size="sm"
                   type="number"
                   step="0.01"
-                  value={project.depositAmount}
+                  min="0"
+                  max="100"
+                  value={project.depositPercent}
                   onChange={(e) =>
-                    updateField("depositAmount", e.target.value)
+                    updateField("depositPercent", e.target.value)
                   }
                   style={{ maxWidth: 200 }}
                 />
@@ -902,6 +1169,18 @@ export default function GutterProjectNewPage() {
                         <td className="text-muted small">Trip Fee</td>
                         <td className="text-end">${fmt(quoteResult.pricing.tripFeePrice)}</td>
                       </tr>
+                      {(quoteResult.pricing.derivedEndCaps?.groups || []).map((group) => (
+                        <tr key={group.index}>
+                          <td className="text-muted small">
+                            {`End Caps Group ${group.index} (R${group.index}/L${group.index})`}
+                          </td>
+                          <td className="text-end">{fmtQty(group.value)} each</td>
+                        </tr>
+                      ))}
+                      <tr>
+                        <td className="text-muted small">Total End Caps</td>
+                        <td className="text-end">{fmtQty(quoteResult.pricing.totalEndCaps)}</td>
+                      </tr>
                       <tr>
                         <td className="text-muted small">End Cap Cost</td>
                         <td className="text-end">${fmt(quoteResult.pricing.endCapCost)}</td>
@@ -918,24 +1197,32 @@ export default function GutterProjectNewPage() {
                           ${fmt(quoteResult.pricing.subtotal)}
                         </td>
                       </tr>
-                      {project.discountIncluded && (
-                        <>
-                          <tr>
-                            <td className="text-muted small">
-                              Discount ({(quoteResult.pricing.discountPercent * 100).toFixed(0)}%)
-                            </td>
-                            <td className="text-end text-danger">
-                              -${fmt(quoteResult.pricing.discountAmount)}
-                            </td>
-                          </tr>
-                          <tr className="table-success">
-                            <td className="fw-bold">Final Price</td>
-                            <td className="text-end fw-bold">
-                              ${fmt(quoteResult.pricing.discountedTotal)}
-                            </td>
-                          </tr>
-                        </>
-                      )}
+                      <tr>
+                        <td className="text-muted small">
+                          Discount ({(quoteResult.pricing.discountPercent * 100).toFixed(2)}%)
+                        </td>
+                        <td className="text-end text-danger">
+                          -${fmt(quoteResult.pricing.discountAmount)}
+                        </td>
+                      </tr>
+                      <tr className="table-success">
+                        <td className="fw-bold">Project Total</td>
+                        <td className="text-end fw-bold">
+                          ${fmt(quoteResult.pricing.projectTotal)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="text-muted small">
+                          Deposit ({fmt(quoteResult.pricing.depositPercentDisplay)}%)
+                        </td>
+                        <td className="text-end">${fmt(quoteResult.pricing.depositAmount)}</td>
+                      </tr>
+                      <tr className="table-warning">
+                        <td className="fw-bold">Remaining Balance</td>
+                        <td className="text-end fw-bold">
+                          ${fmt(quoteResult.pricing.remainingBalance)}
+                        </td>
+                      </tr>
                     </tbody>
                   </Table>
 

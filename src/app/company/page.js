@@ -4,6 +4,13 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Container, Card, Form, Button, Row, Col, Alert } from "react-bootstrap";
 import { supabase } from "@/lib/supabase";
+import { createCacheKey, invalidateCacheKeys } from "@/lib/cache/clientCache";
+import { getSupabaseSelectWithCache } from "@/lib/cache/supabaseCache";
+
+const CACHE_NAMESPACE = "psb-universe";
+const CACHE_KEYS = {
+  companyProfile: createCacheKey("company", "profile"),
+};
 
 export default function CompanyProfilePage() {
   const [profile, setProfile] = useState({
@@ -13,14 +20,29 @@ export default function CompanyProfilePage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
 
-  async function loadProfile() {
-    const { data } = await supabase
-      .from("PSB_S_Company")
-      .select("*")
-      .limit(1)
-      .single();
-    if (data) {
-      setProfile({ email: data.email || "", phone: data.phone || "" });
+  async function loadProfile(options = {}) {
+    const forceFresh = Boolean(options.forceFresh);
+
+    try {
+      const response = await getSupabaseSelectWithCache({
+        cacheKey: CACHE_KEYS.companyProfile,
+        namespace: CACHE_NAMESPACE,
+        forceFresh,
+        query: {
+          table: "PSB_S_Company",
+          select: "*",
+          limit: 1,
+          single: true,
+        },
+      });
+
+      const data = response?.data;
+      if (data) {
+        setProfile({ email: data.email || "", phone: data.phone || "" });
+      }
+    } catch (error) {
+      console.error("Failed to load company profile", error);
+      setMessage("Error loading profile.");
     }
   }
 
@@ -41,15 +63,28 @@ export default function CompanyProfilePage() {
       .delete()
       .gte("id", 0);
 
-    const { error } = await supabase
+    if (delError) {
+      setMessage("Error saving: " + delError.message);
+      setSaving(false);
+      return;
+    }
+
+    const { error: insError } = await supabase
       .from("PSB_S_Company")
       .insert([{ email: profile.email, phone: profile.phone }]);
 
-    setMessage(
-      error || delError
-        ? "Error saving: " + (error || delError).message
-        : "Profile saved."
-    );
+    if (insError) {
+      setMessage("Error saving: " + insError.message);
+      setSaving(false);
+      return;
+    }
+
+    invalidateCacheKeys([CACHE_KEYS.companyProfile], {
+      namespace: CACHE_NAMESPACE,
+    });
+    await loadProfile({ forceFresh: true });
+
+    setMessage("Profile saved.");
     setSaving(false);
   };
 
@@ -107,7 +142,10 @@ export default function CompanyProfilePage() {
             <Button variant="success" onClick={saveProfile} disabled={saving}>
               {saving ? "Saving..." : "Save"}
             </Button>
-            <Button variant="outline-secondary" onClick={loadProfile}>
+            <Button
+              variant="outline-secondary"
+              onClick={() => loadProfile({ forceFresh: true })}
+            >
               Reset
             </Button>
           </div>

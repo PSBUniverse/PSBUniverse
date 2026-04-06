@@ -44,11 +44,32 @@ const tiles = [
     category: "Profile",
     items: [
       {
+        title: "User Login",
+        description:
+          "Authenticate users and load role-to-application access from User Master tables.",
+        href: "/login",
+        cta: "Open Login",
+      },
+      {
+        title: "User Profile",
+        description:
+          "Manage your psb_s_user profile, company, department, and status references.",
+        href: "/profile",
+        cta: "Open Profile",
+      },
+      {
         title: "Company Profile",
         description:
           "Update company contact details used across the app header and quote preview.",
         href: "/company",
         cta: "Open Profile",
+      },
+      {
+        title: "Devmain/Admin Settings",
+        description:
+          "Manage users, roles, applications, and access mappings from centralized User Master tables.",
+        href: "/setup/admin",
+        cta: "Open Admin",
       },
     ],
   },
