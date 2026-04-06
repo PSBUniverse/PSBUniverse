@@ -1,14 +1,17 @@
 import "./globals.css";
+import AuthShell from "@/components/AuthShell";
 
 export const metadata = {
-  title: "PSB Quote Engine",
-  description: "Premium Steel Building - Quote Engine",
+  title: "PSBUniverse",
+  description: "PSBUniverse application workspace",
 };
 
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AuthShell>{children}</AuthShell>
+      </body>
     </html>
   );
 }
