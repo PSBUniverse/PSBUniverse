@@ -11,11 +11,15 @@ const CACHE_NAMESPACE = "psb-universe";
 const CACHE_KEYS = {
   companyProfile: createCacheKey("company", "profile"),
 };
+const COMPANY_TABLE = "psb_s_company";
 
 export default function CompanyProfilePage() {
+  const [companyId, setCompanyId] = useState(null);
   const [profile, setProfile] = useState({
-    email: "Sales.pgd@premiumsteelgroup.com",
-    phone: "817-502-2520",
+    name: "Premium Steel Buildings Inc",
+    shortName: "PSB",
+    email: "",
+    phone: "",
   });
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -29,16 +33,26 @@ export default function CompanyProfilePage() {
         namespace: CACHE_NAMESPACE,
         forceFresh,
         query: {
-          table: "PSB_S_Company",
-          select: "*",
+          table: COMPANY_TABLE,
+          select: "comp_id,comp_name,short_name,comp_email,comp_phone",
+          orderBy: "comp_id",
+          ascending: true,
           limit: 1,
-          single: true,
         },
       });
 
-      const data = response?.data;
+      const data = Array.isArray(response?.data)
+        ? response.data[0]
+        : response?.data || null;
+
       if (data) {
-        setProfile({ email: data.email || "", phone: data.phone || "" });
+        setCompanyId(data.comp_id || null);
+        setProfile({
+          name: data.comp_name || "Premium Steel Buildings Inc",
+          shortName: data.short_name || "PSB",
+          email: data.comp_email || "",
+          phone: data.comp_phone || "",
+        });
       }
     } catch (error) {
       console.error("Failed to load company profile", error);
@@ -58,25 +72,39 @@ export default function CompanyProfilePage() {
     setSaving(true);
     setMessage("");
 
-    const { error: delError } = await supabase
-      .from("PSB_S_Company")
-      .delete()
-      .gte("id", 0);
+    const payload = {
+      comp_name: profile.name || "Premium Steel Buildings Inc",
+      short_name: profile.shortName || "PSB",
+      comp_email: profile.email || null,
+      comp_phone: profile.phone || null,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    };
 
-    if (delError) {
-      setMessage("Error saving: " + delError.message);
-      setSaving(false);
-      return;
-    }
+    if (companyId) {
+      const { error } = await supabase
+        .from(COMPANY_TABLE)
+        .update(payload)
+        .eq("comp_id", companyId);
 
-    const { error: insError } = await supabase
-      .from("PSB_S_Company")
-      .insert([{ email: profile.email, phone: profile.phone }]);
+      if (error) {
+        setMessage("Error saving: " + error.message);
+        setSaving(false);
+        return;
+      }
+    } else {
+      const { error } = await supabase
+        .from(COMPANY_TABLE)
+        .insert({
+          ...payload,
+          created_at: new Date().toISOString(),
+        });
 
-    if (insError) {
-      setMessage("Error saving: " + insError.message);
-      setSaving(false);
-      return;
+      if (error) {
+        setMessage("Error saving: " + error.message);
+        setSaving(false);
+        return;
+      }
     }
 
     invalidateCacheKeys([CACHE_KEYS.companyProfile], {
@@ -92,7 +120,7 @@ export default function CompanyProfilePage() {
     <Container className="py-4" style={{ maxWidth: 700 }}>
       <div className="d-flex align-items-center mb-3">
         <Link href="/" className="back-link me-3">
-          â† Back
+          <i className="bi bi-arrow-left" aria-hidden="true" /> Back
         </Link>
         <div>
           <h2 className="mb-0">Company Profile</h2>
@@ -115,6 +143,28 @@ export default function CompanyProfilePage() {
       <Card>
         <Card.Body>
           <Row className="g-3">
+            <Col md={12}>
+              <Form.Group>
+                <Form.Label>Company Name</Form.Label>
+                <Form.Control
+                  value={profile.name}
+                  onChange={(e) =>
+                    setProfile((p) => ({ ...p, name: e.target.value }))
+                  }
+                />
+              </Form.Group>
+            </Col>
+            <Col md={12}>
+              <Form.Group>
+                <Form.Label>Short Name</Form.Label>
+                <Form.Control
+                  value={profile.shortName}
+                  onChange={(e) =>
+                    setProfile((p) => ({ ...p, shortName: e.target.value }))
+                  }
+                />
+              </Form.Group>
+            </Col>
             <Col md={12}>
               <Form.Group>
                 <Form.Label>Email</Form.Label>
@@ -155,6 +205,12 @@ export default function CompanyProfilePage() {
       <Card className="mt-3">
         <Card.Header className="fw-bold">Preview</Card.Header>
         <Card.Body>
+          <p className="mb-1">
+            <strong>Company:</strong> {profile.name}
+          </p>
+          <p className="mb-1">
+            <strong>Short Name:</strong> {profile.shortName}
+          </p>
           <p className="mb-1">
             <strong>Email:</strong> {profile.email}
           </p>

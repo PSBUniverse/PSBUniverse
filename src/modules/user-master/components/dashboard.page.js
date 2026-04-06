@@ -1,7 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Container, Row, Col, Card } from "react-bootstrap";
+import { Alert, Container, Row, Col, Card, Spinner } from "react-bootstrap";
 
 const tiles = [
   {
@@ -87,6 +88,72 @@ const tiles = [
 ];
 
 export default function HomePage() {
+  const [loadingAccess, setLoadingAccess] = useState(true);
+  const [canViewApps, setCanViewApps] = useState(false);
+  const [accessMessage, setAccessMessage] = useState("");
+
+  useEffect(() => {
+    async function checkAccess() {
+      setLoadingAccess(true);
+      setAccessMessage("");
+
+      try {
+        const response = await fetch("/api/user-master/session", {
+          method: "GET",
+          cache: "no-store",
+        });
+
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          setCanViewApps(false);
+          setAccessMessage("Unable to verify app access right now. Please try again.");
+          return;
+        }
+
+        const accountInactive = Boolean(payload?.accountInactive);
+        const statusRestricted = Boolean(payload?.statusRestricted);
+
+        if (accountInactive) {
+          setCanViewApps(false);
+          setAccessMessage(
+            "Your account is currently inactive. You can use My PSB, but app modules are unavailable until your account is reactivated."
+          );
+          return;
+        }
+
+        if (statusRestricted) {
+          setCanViewApps(false);
+          setAccessMessage(
+            "Your account status does not allow app access right now. You can use My PSB while an administrator updates your status."
+          );
+          return;
+        }
+
+        const hasAppAccess = Boolean(
+          payload?.access?.isDevMain ||
+            payload?.access?.hasAccess ||
+            payload?.access?.permissions?.read
+        );
+
+        setCanViewApps(hasAppAccess);
+
+        if (!hasAppAccess) {
+          setAccessMessage(
+            "Your account is signed in, but no apps are assigned yet. Please contact your administrator."
+          );
+        }
+      } catch {
+        setCanViewApps(false);
+        setAccessMessage("Unable to verify app access right now. Please try again.");
+      } finally {
+        setLoadingAccess(false);
+      }
+    }
+
+    void checkAccess();
+  }, []);
+
   return (
     <Container className="py-4" style={{ maxWidth: 1200 }}>
       <div
@@ -131,7 +198,17 @@ export default function HomePage() {
         </Row>
       </div>
 
-      {tiles.map((section) => (
+      {loadingAccess ? (
+        <div className="d-flex align-items-center gap-2 text-muted py-2">
+          <Spinner animation="border" size="sm" />
+          Checking app access...
+        </div>
+      ) : !canViewApps ? (
+        <Alert variant="warning" className="mb-0">
+          {accessMessage}
+        </Alert>
+      ) : (
+        tiles.map((section) => (
         <div key={section.category} className="mb-4">
           <p
             className="text-uppercase fw-bold mb-2"
@@ -158,7 +235,8 @@ export default function HomePage() {
             ))}
           </Row>
         </div>
-      ))}
+        ))
+      )}
     </Container>
   );
 }

@@ -109,6 +109,73 @@ export async function POST(request) {
   }
 }
 
+export async function PATCH(request) {
+  try {
+    const gate = await requireActionPermission({
+      action: "update",
+      appKey: getAdminAppKey(request),
+      rolePermissionMap: ADMIN_ROLE_PERMISSION_MAP,
+    });
+
+    if (gate.error) return gate.error;
+
+    const body = await request.json();
+    const uarId = body?.uar_id ?? body?.uarId;
+
+    if (!hasValue(uarId)) {
+      return toErrorResponse("uar_id is required", 400);
+    }
+
+    const updates = {};
+    ["user_id", "role_id", "app_id", "is_active"].forEach((field) => {
+      if (Object.prototype.hasOwnProperty.call(body || {}, field)) {
+        updates[field] = body[field];
+      }
+    });
+
+    if (Object.keys(updates).length === 0) {
+      return toErrorResponse("No mapping update fields were provided", 400);
+    }
+
+    const { data: existing, error: existingError } = await gate.context.supabaseClient
+      .from(USER_MASTER_TABLES.userAppRoleAccess)
+      .select("*")
+      .eq("uar_id", uarId)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+    if (!existing) {
+      return toErrorResponse("Mapping not found", 404);
+    }
+
+    const nextUserId = updates.user_id ?? existing.user_id;
+    const nextRoleId = updates.role_id ?? existing.role_id;
+    const nextAppId = updates.app_id ?? existing.app_id;
+
+    await assertMappingReferencesValid(gate.context.supabaseClient, {
+      user_id: nextUserId,
+      role_id: nextRoleId,
+      app_id: nextAppId,
+    });
+
+    const { data, error } = await gate.context.supabaseClient
+      .from(USER_MASTER_TABLES.userAppRoleAccess)
+      .update(updates)
+      .eq("uar_id", uarId)
+      .select("*")
+      .single();
+
+    if (error) throw error;
+
+    return NextResponse.json({
+      message: "Access mapping updated",
+      mapping: data,
+    });
+  } catch (error) {
+    return toErrorResponse(error?.message || "Unable to update access mapping", 500);
+  }
+}
+
 export async function DELETE(request) {
   try {
     const gate = await requireActionPermission({

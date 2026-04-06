@@ -280,7 +280,7 @@ export default function GutterSetupPage() {
     <Container className="py-4" style={{ maxWidth: 900 }}>
       <div className="d-flex align-items-center mb-3">
         <Link href="/" className="back-link me-3">
-          â† Back
+          <i className="bi bi-arrow-left" aria-hidden="true" /> Back
         </Link>
         <div>
           <h2 className="mb-0">Gutter Setup Tables</h2>

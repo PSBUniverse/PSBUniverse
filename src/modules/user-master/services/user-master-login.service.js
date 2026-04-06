@@ -11,10 +11,16 @@ import { writeSessionCookie } from "@/modules/user-master/session/user-master.se
 
 const STATUS_TEXT_FIELDS = [
   "status_name",
+  "sts_name",
   "name",
   "code",
   "status_code",
+  "status",
   "label",
+  "description",
+  "status_desc",
+  "status_description",
+  "sts_desc",
   "slug",
   "key",
 ];
@@ -71,6 +77,10 @@ async function getStatusRecord(supabaseClient, statusId) {
 function isBlockedStatus(statusRecord) {
   if (!statusRecord || typeof statusRecord !== "object") return false;
 
+  if (statusRecord.is_active === false) {
+    return true;
+  }
+
   const text = STATUS_TEXT_FIELDS.map((field) => statusRecord[field])
     .filter((value) => typeof value === "string" && value.trim())
     .join(" ")
@@ -88,23 +98,19 @@ export async function POST(request) {
     const requestedAppKey = String(body?.appKey || "").trim() || null;
 
     if (!identifier || !password) {
-      return toErrorResponse("identifier and password are required", 400);
+      return toErrorResponse("Please enter your username/email and password.", 400);
     }
 
     const supabaseClient = getServerSupabaseClient();
     const userRecord = await findUserByIdentifier(supabaseClient, identifier);
 
     if (!userRecord) {
-      return toErrorResponse("Invalid username/email or password", 401);
+      return toErrorResponse("Username/email or password is incorrect.", 401);
     }
 
     const isPasswordValid = await verifyPasswordHash(password, userRecord.password_hash);
     if (!isPasswordValid) {
-      return toErrorResponse("Invalid username/email or password", 401);
-    }
-
-    if (userRecord.is_active === false) {
-      return toErrorResponse("User account is inactive", 403);
+      return toErrorResponse("Username/email or password is incorrect.", 401);
     }
 
     const statusRecord = await getStatusRecord(
@@ -112,22 +118,14 @@ export async function POST(request) {
       userRecord[USER_MASTER_COLUMNS.statusId]
     );
 
-    if (isBlockedStatus(statusRecord)) {
-      return toErrorResponse("User status does not allow login", 403);
-    }
+    const accountInactive = userRecord.is_active === false;
+    const statusRestricted = isBlockedStatus(statusRecord);
 
     const access = await resolveUserRoleAccess({
       userId: userRecord[USER_MASTER_COLUMNS.userId],
       appKey: requestedAppKey,
       supabaseClient,
     });
-
-    if (!access.hasAccess) {
-      return toErrorResponse(
-        "No role/application access mapping found for this user",
-        403
-      );
-    }
 
     const sessionPayload = {
       userId: String(userRecord[USER_MASTER_COLUMNS.userId]),
@@ -143,12 +141,15 @@ export async function POST(request) {
       user: sanitizeUserRecord(userRecord),
       access,
       status: statusRecord,
+      accountInactive,
+      statusRestricted,
+      limitedAccess: !access.hasAccess || accountInactive || statusRestricted,
     });
 
     writeSessionCookie(response, sessionPayload);
     return response;
   } catch (error) {
-    return toErrorResponse(error?.message || "Login failed", 500);
+    return toErrorResponse(error?.message || "Unable to sign in right now. Please try again.", 500);
   }
 }
 

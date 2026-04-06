@@ -12,10 +12,16 @@ import { readSessionPayloadFromCookies } from "@/modules/user-master/session/use
 
 const STATUS_TEXT_FIELDS = [
   "status_name",
+  "sts_name",
   "name",
   "code",
   "status_code",
+  "status",
   "label",
+  "description",
+  "status_desc",
+  "status_description",
+  "sts_desc",
   "slug",
   "key",
 ];
@@ -40,6 +46,10 @@ function hasValue(value) {
 
 function statusLooksInactive(statusRecord) {
   if (!statusRecord || typeof statusRecord !== "object") return false;
+
+  if (statusRecord.is_active === false) {
+    return true;
+  }
 
   const mergedText = STATUS_TEXT_FIELDS.map((field) => statusRecord[field])
     .filter((value) => typeof value === "string" && value.trim())
@@ -103,14 +113,9 @@ export async function getAuthenticatedContext(options = {}) {
     return { error: toErrorResponse("User not found for active session", 401) };
   }
 
-  if (userRecord.is_active === false) {
-    return { error: toErrorResponse("User account is inactive", 403) };
-  }
-
   const statusRecord = await getUserStatusRecord(userRecord, supabaseClient);
-  if (statusLooksInactive(statusRecord)) {
-    return { error: toErrorResponse("User status does not allow access", 403) };
-  }
+  const accountInactive = userRecord.is_active === false;
+  const statusRestricted = statusLooksInactive(statusRecord);
 
   const access = await resolveUserRoleAccess({
     userId: userRecord[USER_MASTER_COLUMNS.userId],
@@ -124,6 +129,8 @@ export async function getAuthenticatedContext(options = {}) {
     safeUser: sanitizeUserRecord(userRecord),
     statusRecord,
     access,
+    accountInactive,
+    statusRestricted,
     supabaseClient,
   };
 }

@@ -26,6 +26,9 @@ export async function GET(request) {
       user: auth.safeUser,
       status: auth.statusRecord,
       access: scopedAccess,
+      accountInactive: Boolean(auth.accountInactive),
+      statusRestricted: Boolean(auth.statusRestricted),
+      limitedAccess: Boolean(auth.limitedAccess),
     });
   } catch (error) {
     return toErrorResponse(error?.message || "Unable to load session", 500);

@@ -90,10 +90,17 @@ export function cacheSessionData(config = {}) {
   }
 
   if (user) {
-    setCacheEntry(USER_MASTER_CACHE_KEYS.profile, user, {
-      namespace: USER_MASTER_CACHE_NAMESPACE,
-      ttlMs: USER_MASTER_CACHE_TTL.profileMs,
-    });
+    setCacheEntry(
+      USER_MASTER_CACHE_KEYS.profile,
+      {
+        user,
+        relations: null,
+      },
+      {
+        namespace: USER_MASTER_CACHE_NAMESPACE,
+        ttlMs: USER_MASTER_CACHE_TTL.profileMs,
+      }
+    );
   }
 
   if (access) {

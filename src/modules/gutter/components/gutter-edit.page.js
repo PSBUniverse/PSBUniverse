@@ -547,7 +547,7 @@ export default function GutterProjectEditPage({ params }) {
     <Container className="py-4" style={{ maxWidth: 1100 }}>
       <div className="d-flex align-items-center mb-3">
         <Link href="/gutter" className="back-link me-3">
-          ΓåÉ Back
+          <i className="bi bi-arrow-left" aria-hidden="true" /> Back
         </Link>
         <div>
           <h2 className="mb-0">Edit Gutter Project</h2>

@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Container, Spinner } from "react-bootstrap";
 import Header from "@/shared/components/layout/Header";
-import Sidebar from "@/shared/components/layout/Sidebar";
 import { useUserMaster } from "@/modules/user-master/hooks/useUserMaster";
 
 export default function AppLayout({ children }) {
@@ -41,16 +40,28 @@ export default function AppLayout({ children }) {
     return null;
   }
 
-  const showAdmin = Boolean(access?.isDevMain || access?.permissions?.update);
+  const roleKeys = Array.isArray(access?.roleKeys)
+    ? access.roleKeys.map((value) => String(value || "").toLowerCase())
+    : [];
+  const normalizedUserRole = String(user?.role || user?.role_name || "").toLowerCase();
+  const showConfiguration =
+    Boolean(access?.isDevMain) ||
+    roleKeys.includes("devmain") ||
+    roleKeys.includes("admin") ||
+    normalizedUserRole === "devmain" ||
+    normalizedUserRole === "admin";
 
   return (
     <div className="app-shell">
-      <Header user={user} onLogout={handleLogout} logoutBusy={logoutBusy} />
-      <Container fluid className="app-shell-body px-0">
-        <div className="app-shell-grid">
-          <Sidebar pathname={pathname} showAdmin={showAdmin} />
-          <section className="app-content">{children}</section>
-        </div>
+      <Header
+        pathname={pathname}
+        user={user}
+        onLogout={handleLogout}
+        logoutBusy={logoutBusy}
+        showConfiguration={showConfiguration}
+      />
+      <Container fluid className="app-shell-body">
+        <section className="app-content">{children}</section>
       </Container>
     </div>
   );

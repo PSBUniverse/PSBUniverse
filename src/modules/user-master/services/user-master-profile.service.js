@@ -1,29 +1,12 @@
 ﻿import { NextResponse } from "next/server";
 import {
-  updateUserAccount,
-  USER_MASTER_COLUMNS,
   USER_MASTER_TABLES,
 } from "@/modules/user-master/access/user-master.access";
-import { hashPassword } from "@/core/security/password.security";
-import { assertUserReferencesValid } from "@/modules/user-master/validators/user-master.validator";
 import {
   getAuthenticatedContext,
   sanitizeUserRecord,
   toErrorResponse,
 } from "@/modules/user-master/services/user-master-route-auth.service";
-
-const ALLOWED_PROFILE_FIELDS = [
-  "username",
-  "email",
-  "first_name",
-  "last_name",
-  "phone",
-  "address",
-  "comp_id",
-  "dept_id",
-  "status_id",
-  "is_active",
-];
 
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
@@ -85,47 +68,12 @@ export async function PATCH(request) {
   try {
     const auth = await getAuthenticatedContext();
     if (auth.error) return auth.error;
-
-    const body = await request.json();
-    const updates = {};
-
-    ALLOWED_PROFILE_FIELDS.forEach((field) => {
-      if (Object.prototype.hasOwnProperty.call(body || {}, field)) {
-        updates[field] = body[field];
-      }
-    });
-
-    if (hasValue(body?.password)) {
-      updates.password_hash = await hashPassword(body.password);
-    }
-
-    if (Object.keys(updates).length === 0) {
-      return toErrorResponse("No valid profile fields were provided", 400);
-    }
-
-    await assertUserReferencesValid(auth.supabaseClient, {
-      comp_id: updates.comp_id,
-      dept_id: updates.dept_id,
-      status_id: updates.status_id,
-      existingCompanyId: auth.userRecord.comp_id,
-    });
-
-    const updatedUser = await updateUserAccount({
-      userId: auth.userRecord[USER_MASTER_COLUMNS.userId],
-      updates,
-      actorUserId: auth.userRecord[USER_MASTER_COLUMNS.userId],
-      supabaseClient: auth.supabaseClient,
-    });
-
-    const relations = await loadProfileRelations(auth.supabaseClient, updatedUser);
-
-    return NextResponse.json({
-      message: "Profile updated",
-      user: sanitizeUserRecord(updatedUser),
-      relations,
-    });
+    return toErrorResponse(
+      "Profile and password changes are available only in Configuration & Settings. Please email your administrator.",
+      403
+    );
   } catch (error) {
-    return toErrorResponse(error?.message || "Unable to update profile", 500);
+    return toErrorResponse(error?.message || "Unable to process profile request", 500);
   }
 }
 

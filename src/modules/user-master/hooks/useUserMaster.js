@@ -7,6 +7,9 @@ export function useUserMaster() {
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
   const [access, setAccess] = useState(null);
+  const [accountInactive, setAccountInactive] = useState(false);
+  const [statusRestricted, setStatusRestricted] = useState(false);
+  const [limitedAccess, setLimitedAccess] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -20,6 +23,9 @@ export function useUserMaster() {
         setSession(null);
         setUser(null);
         setAccess(null);
+        setAccountInactive(false);
+        setStatusRestricted(false);
+        setLimitedAccess(false);
         return;
       }
 
@@ -27,10 +33,16 @@ export function useUserMaster() {
       setSession(payload?.session || null);
       setUser(payload?.user || null);
       setAccess(payload?.access || null);
+      setAccountInactive(Boolean(payload?.accountInactive));
+      setStatusRestricted(Boolean(payload?.statusRestricted));
+      setLimitedAccess(Boolean(payload?.limitedAccess));
     } catch {
       setSession(null);
       setUser(null);
       setAccess(null);
+      setAccountInactive(false);
+      setStatusRestricted(false);
+      setLimitedAccess(false);
     } finally {
       setLoading(false);
     }
@@ -45,6 +57,9 @@ export function useUserMaster() {
     session,
     user,
     access,
+    accountInactive,
+    statusRestricted,
+    limitedAccess,
     refresh,
     isAuthenticated: Boolean(session?.userId),
   };

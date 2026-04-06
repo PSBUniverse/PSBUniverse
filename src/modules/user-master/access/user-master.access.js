@@ -7,7 +7,7 @@ export const USER_MASTER_TABLES = {
   roles: "psb_s_role",
   applications: "psb_s_application",
   statuses: "psb_s_status",
-  userAppRoleAccess: "psb_m_userappproleaccess",
+  userAppRoleAccess: "psb_m_userapproleaccess",
 };
 
 export const USER_MASTER_COLUMNS = {

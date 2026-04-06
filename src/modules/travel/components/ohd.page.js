@@ -8,7 +8,7 @@ export default function OhdPage() {
     <Container className="py-4" style={{ maxWidth: 800 }}>
       <div className="d-flex align-items-center mb-3">
         <Link href="/" className="back-link me-3">
-          ← Back
+          <i className="bi bi-arrow-left" aria-hidden="true" /> Back
         </Link>
         <h2 className="mb-0">OHD Calculator</h2>
       </div>

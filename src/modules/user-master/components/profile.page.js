@@ -1,21 +1,19 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Col,
   Container,
-  Form,
   Row,
 } from "react-bootstrap";
 import {
   cacheReferenceData,
   cacheSessionData,
   getCachedJson,
-  invalidateUserMasterCache,
   USER_MASTER_CACHE_KEYS,
   USER_MASTER_CACHE_TTL,
 } from "@/modules/user-master/cache/user-master.cache";
@@ -23,6 +21,10 @@ import {
 function getLabel(record, preferredFields = []) {
   const candidates = [
     ...preferredFields,
+    "sts_name",
+    "comp_name",
+    "dept_name",
+    "status_name",
     "name",
     "label",
     "code",
@@ -40,25 +42,55 @@ function getLabel(record, preferredFields = []) {
   return "(Unnamed)";
 }
 
-function asSelectValue(value) {
-  if (value === undefined || value === null || value === "") return "";
-  return String(value);
+function getValue(value, fallback = "Not provided") {
+  if (value === undefined || value === null) return fallback;
+  const text = String(value).trim();
+  return text || fallback;
 }
 
-function toNullableNumber(value) {
-  if (value === "" || value === undefined || value === null) {
-    return null;
+function buildInitials(firstName, lastName, username) {
+  const first = String(firstName || "").trim().charAt(0);
+  const last = String(lastName || "").trim().charAt(0);
+
+  if (first || last) {
+    return `${first}${last}`.toUpperCase();
   }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+
+  return String(username || "U").trim().charAt(0).toUpperCase() || "U";
+}
+
+function normalizeProfilePayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return {
+      user: null,
+      relations: {},
+    };
+  }
+
+  // Supports legacy cache shape (plain user object) and current API shape ({ user, relations }).
+  if (Object.prototype.hasOwnProperty.call(payload, "user")) {
+    return {
+      user: payload.user || null,
+      relations: payload.relations || {},
+    };
+  }
+
+  return {
+    user: payload,
+    relations: {},
+  };
 }
 
 export default function UserProfilePage() {
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [session, setSession] = useState(null);
   const [access, setAccess] = useState(null);
+  const [relations, setRelations] = useState({
+    company: null,
+    department: null,
+    status: null,
+  });
   const [references, setReferences] = useState({
     companies: [],
     departments: [],
@@ -75,7 +107,6 @@ export default function UserProfilePage() {
     comp_id: "",
     dept_id: "",
     status_id: "",
-    password: "",
   });
 
   const loadProfile = useCallback(async (options = {}) => {
@@ -84,7 +115,7 @@ export default function UserProfilePage() {
     setMessage("");
 
     try {
-      const [sessionPayload, profilePayload, bootstrapPayload] = await Promise.all([
+      const [sessionPayload, profilePayloadRaw, bootstrapPayload] = await Promise.all([
         getCachedJson({
           key: USER_MASTER_CACHE_KEYS.session,
           url: "/api/user-master/session",
@@ -108,9 +139,30 @@ export default function UserProfilePage() {
         }),
       ]);
 
+      let profilePayload = normalizeProfilePayload(profilePayloadRaw);
+
+      // If cached profile data is incomplete, force a database refresh for this payload.
+      if (!forceFresh && !profilePayload.user?.user_id) {
+        try {
+          const freshProfilePayloadRaw = await getCachedJson({
+            key: USER_MASTER_CACHE_KEYS.profile,
+            url: "/api/user-master/profile",
+            ttlMs: USER_MASTER_CACHE_TTL.profileMs,
+            forceFresh: true,
+            allowStaleOnError: false,
+          });
+
+          profilePayload = normalizeProfilePayload(freshProfilePayloadRaw);
+        } catch {
+          // Keep best available cached/session data if fresh fetch fails.
+        }
+      }
+
+      const resolvedUser = profilePayload.user || sessionPayload.user || null;
+
       cacheSessionData({
         session: sessionPayload.session,
-        user: profilePayload.user,
+        user: resolvedUser,
         access: sessionPayload.access,
       });
 
@@ -118,13 +170,14 @@ export default function UserProfilePage() {
 
       setSession(sessionPayload.session || null);
       setAccess(sessionPayload.access || null);
+      setRelations(profilePayload.relations || {});
       setReferences({
         companies: bootstrapPayload.companies || [],
         departments: bootstrapPayload.departments || [],
         statuses: bootstrapPayload.statuses || [],
       });
 
-      const user = profilePayload.user || {};
+      const user = resolvedUser || {};
       setProfile({
         username: user.username || "",
         email: user.email || "",
@@ -132,10 +185,10 @@ export default function UserProfilePage() {
         last_name: user.last_name || "",
         phone: user.phone || "",
         address: user.address || "",
-        comp_id: asSelectValue(user.comp_id),
-        dept_id: asSelectValue(user.dept_id),
-        status_id: asSelectValue(user.status_id),
-        password: "",
+        comp_id: user.comp_id === undefined || user.comp_id === null ? "" : String(user.comp_id),
+        dept_id: user.dept_id === undefined || user.dept_id === null ? "" : String(user.dept_id),
+        status_id:
+          user.status_id === undefined || user.status_id === null ? "" : String(user.status_id),
       });
     } catch (error) {
       setMessage(error?.message || "Unable to load profile");
@@ -148,262 +201,193 @@ export default function UserProfilePage() {
     void loadProfile();
   }, [loadProfile]);
 
-  const departmentOptions = useMemo(() => {
-    if (!profile.comp_id) return references.departments;
-    return references.departments.filter(
-      (dept) => String(dept.comp_id) === String(profile.comp_id)
+  const companyLabel = useMemo(() => {
+    const selected = references.companies.find(
+      (company) => String(company.comp_id) === String(profile.comp_id)
     );
-  }, [profile.comp_id, references.departments]);
 
-  async function saveProfile(event) {
-    event.preventDefault();
-    setSaving(true);
-    setMessage("");
+    if (selected) return getLabel(selected, ["comp_name", "company_name"]);
+    if (relations?.company) return getLabel(relations.company, ["comp_name", "company_name"]);
+    return "No company assigned";
+  }, [profile.comp_id, references.companies, relations]);
 
-    try {
-      const response = await fetch("/api/user-master/profile", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          username: profile.username,
-          email: profile.email,
-          first_name: profile.first_name,
-          last_name: profile.last_name,
-          phone: profile.phone,
-          address: profile.address,
-          comp_id: toNullableNumber(profile.comp_id),
-          dept_id: toNullableNumber(profile.dept_id),
-          status_id: toNullableNumber(profile.status_id),
-          ...(profile.password ? { password: profile.password } : {}),
-        }),
-      });
+  const departmentLabel = useMemo(() => {
+    const selected = references.departments.find(
+      (department) => String(department.dept_id) === String(profile.dept_id)
+    );
 
-      const payload = await response.json();
-
-      if (!response.ok) {
-        throw new Error(payload?.error || "Unable to update profile");
-      }
-
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.profile,
-        USER_MASTER_CACHE_KEYS.session,
-      ]);
-
-      setMessage("Profile updated.");
-      await loadProfile({ forceFresh: true });
-    } catch (error) {
-      setMessage(error?.message || "Unable to update profile");
-    } finally {
-      setSaving(false);
+    if (selected) return getLabel(selected, ["dept_name", "department_name"]);
+    if (relations?.department) {
+      return getLabel(relations.department, ["dept_name", "department_name"]);
     }
-  }
+    return "No department assigned";
+  }, [profile.dept_id, references.departments, relations]);
+
+  const statusLabel = useMemo(() => {
+    const selected = references.statuses.find(
+      (status) => String(status.status_id) === String(profile.status_id)
+    );
+
+    if (selected) return getLabel(selected, ["sts_name", "status_name"]);
+    if (relations?.status) return getLabel(relations.status, ["sts_name", "status_name"]);
+    return "No status assigned";
+  }, [profile.status_id, references.statuses, relations]);
+
+  const fullName = useMemo(() => {
+    const first = String(profile.first_name || "").trim();
+    const last = String(profile.last_name || "").trim();
+
+    if (first || last) {
+      return `${first} ${last}`.trim();
+    }
+
+    return profile.username || "User";
+  }, [profile.first_name, profile.last_name, profile.username]);
+
+  const initials = useMemo(() => {
+    return buildInitials(profile.first_name, profile.last_name, profile.username);
+  }, [profile.first_name, profile.last_name, profile.username]);
+
+  const adminEmail = useMemo(() => {
+    const companyEmail = String(relations?.company?.comp_email || "").trim();
+    return companyEmail || "";
+  }, [relations]);
+
+  const roleSummary = useMemo(() => {
+    if (!access) return "Role is being resolved";
+
+    if (access.isDevMain) {
+      return "DEVMAIN";
+    }
+
+    if (Array.isArray(access.roleKeys) && access.roleKeys.length > 0) {
+      return access.roleKeys.map((value) => String(value || "").toUpperCase()).join(" • ");
+    }
+
+    return access.hasAccess ? "Assigned User" : "Unassigned User";
+  }, [access]);
 
   if (loading) {
     return <Container className="py-4">Loading profile...</Container>;
   }
 
   return (
-    <Container className="py-4" style={{ maxWidth: 1050 }}>
-      <div className="d-flex align-items-center mb-3">
-        <Link href="/" className="back-link me-3">
-          â† Back
-        </Link>
-        <div>
-          <h2 className="mb-0">User Profile</h2>
-          <p className="text-muted mb-0" style={{ fontSize: "0.86rem" }}>
-            Data source: psb_s_user with company/department/status references.
-          </p>
-        </div>
+    <Container className="py-4 profile-page-shell" style={{ maxWidth: 1120 }}>
+      <div className="mb-3">
+        <h2 className="mb-0">User Profile</h2>
+        <p className="text-muted mb-0" style={{ fontSize: "0.86rem" }}>
+          A simple, read-only profile view for your account.
+        </p>
       </div>
 
-      {message ? (
-        <Alert variant={message.toLowerCase().includes("updated") ? "success" : "danger"}>
-          {message}
-        </Alert>
-      ) : null}
+      <Alert variant="info" className="profile-readonly-alert">
+        Profile and password updates are managed by administrators in Configuration & Settings.
+        Please email your administrator to request any changes.
+      </Alert>
+
+      {message ? <Alert variant="danger">{message}</Alert> : null}
 
       {access && !access.hasAccess ? (
         <Alert variant="warning" className="mb-3">
-          Your account has no role mapping in psb_m_userappproleaccess.
+          Your account has no role mapping in psb_m_userapproleaccess.
         </Alert>
       ) : null}
 
-      <Card className="shadow-sm">
-        <Card.Body>
-          <Form onSubmit={saveProfile}>
-            <Row className="g-3">
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>Username</Form.Label>
-                  <Form.Control
-                    value={profile.username}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, username: event.target.value }))
-                    }
-                  />
-                </Form.Group>
-              </Col>
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>Email</Form.Label>
-                  <Form.Control
-                    type="email"
-                    value={profile.email}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, email: event.target.value }))
-                    }
-                  />
-                </Form.Group>
-              </Col>
+      <Row className="g-3 align-items-stretch">
+        <Col lg={4}>
+          <Card className="profile-social-card border-0 shadow-sm h-100">
+            <Card.Body>
+              <div className="profile-avatar">{initials}</div>
+              <h3 className="profile-name mb-1">{fullName}</h3>
+              <p className="profile-handle mb-2">@{getValue(profile.username, "unknown")}</p>
+              <Badge bg="light" text="dark" className="profile-status-badge">
+                {statusLabel}
+              </Badge>
 
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>First Name</Form.Label>
-                  <Form.Control
-                    value={profile.first_name}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, first_name: event.target.value }))
-                    }
-                  />
-                </Form.Group>
-              </Col>
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>Last Name</Form.Label>
-                  <Form.Control
-                    value={profile.last_name}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, last_name: event.target.value }))
-                    }
-                  />
-                </Form.Group>
-              </Col>
+              <div className="profile-org-lines mt-3">
+                <p className="mb-1">{companyLabel}</p>
+                <p className="mb-0">{departmentLabel}</p>
+              </div>
 
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>Phone</Form.Label>
-                  <Form.Control
-                    value={profile.phone}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, phone: event.target.value }))
-                    }
-                  />
-                </Form.Group>
-              </Col>
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>Address</Form.Label>
-                  <Form.Control
-                    value={profile.address}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, address: event.target.value }))
-                    }
-                  />
-                </Form.Group>
-              </Col>
+              <div className="mt-4" style={{ fontSize: "0.9rem" }}>
+                <p className="mb-1 text-muted">Administrator Contact</p>
+                <p className="mb-0 fw-semibold">
+                  {adminEmail || "Administrator Email Not Available"}
+                </p>
+              </div>
+            </Card.Body>
+          </Card>
+        </Col>
 
-              <Col md={4}>
-                <Form.Group>
-                  <Form.Label>Company</Form.Label>
-                  <Form.Select
-                    value={profile.comp_id}
-                    onChange={(event) =>
-                      setProfile((prev) => ({
-                        ...prev,
-                        comp_id: event.target.value,
-                        dept_id: "",
-                      }))
-                    }
-                  >
-                    <option value="">Select company...</option>
-                    {references.companies.map((company) => (
-                      <option key={String(company.comp_id)} value={String(company.comp_id)}>
-                        {getLabel(company, ["comp_name", "company_name"])}
-                      </option>
-                    ))}
-                  </Form.Select>
-                </Form.Group>
-              </Col>
+        <Col lg={8}>
+          <Card className="profile-summary-card border-0 shadow-sm mb-3">
+            <Card.Body>
+              <p className="profile-section-kicker mb-1">My PSB</p>
+              <h4 className="mb-1">Profile Snapshot</h4>
+              <p className="text-muted mb-3" style={{ fontSize: "0.9rem" }}>
+                Your account details are visible here for quick reference.
+              </p>
 
-              <Col md={4}>
-                <Form.Group>
-                  <Form.Label>Department</Form.Label>
-                  <Form.Select
-                    value={profile.dept_id}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, dept_id: event.target.value }))
-                    }
-                  >
-                    <option value="">Select department...</option>
-                    {departmentOptions.map((department) => (
-                      <option
-                        key={String(department.dept_id)}
-                        value={String(department.dept_id)}
-                      >
-                        {getLabel(department, ["dept_name", "department_name"])}
-                      </option>
-                    ))}
-                  </Form.Select>
-                </Form.Group>
-              </Col>
+              <Row className="g-2">
+                <Col sm={6}>
+                  <div className="profile-detail-tile">
+                    <p className="profile-detail-label mb-1">Email</p>
+                    <p className="profile-detail-value mb-0">{getValue(profile.email)}</p>
+                  </div>
+                </Col>
+                <Col sm={6}>
+                  <div className="profile-detail-tile">
+                    <p className="profile-detail-label mb-1">Phone</p>
+                    <p className="profile-detail-value mb-0">{getValue(profile.phone)}</p>
+                  </div>
+                </Col>
+                <Col sm={6}>
+                  <div className="profile-detail-tile">
+                    <p className="profile-detail-label mb-1">Address</p>
+                    <p className="profile-detail-value mb-0">{getValue(profile.address)}</p>
+                  </div>
+                </Col>
+                <Col sm={6}>
+                  <div className="profile-detail-tile">
+                    <p className="profile-detail-label mb-1">Role</p>
+                    <p className="profile-detail-value mb-0">{roleSummary}</p>
+                  </div>
+                </Col>
+                <Col sm={6}>
+                  <div className="profile-detail-tile">
+                    <p className="profile-detail-label mb-1">Session User</p>
+                    <p className="profile-detail-value mb-0">
+                      {session?.username || session?.email || "Unknown"}
+                    </p>
+                  </div>
+                </Col>
+                <Col sm={6}>
+                  <div className="profile-detail-tile">
+                    <p className="profile-detail-label mb-1">Signed In</p>
+                    <p className="profile-detail-value mb-0">
+                      {session?.loginAt
+                        ? new Date(session.loginAt).toLocaleString()
+                        : "Unavailable"}
+                    </p>
+                  </div>
+                </Col>
+              </Row>
+            </Card.Body>
+          </Card>
 
-              <Col md={4}>
-                <Form.Group>
-                  <Form.Label>Status</Form.Label>
-                  <Form.Select
-                    value={profile.status_id}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, status_id: event.target.value }))
-                    }
-                  >
-                    <option value="">Select status...</option>
-                    {references.statuses.map((status) => (
-                      <option key={String(status.status_id)} value={String(status.status_id)}>
-                        {getLabel(status, ["status_name"])}
-                      </option>
-                    ))}
-                  </Form.Select>
-                </Form.Group>
-              </Col>
-
-              <Col md={6}>
-                <Form.Group>
-                  <Form.Label>New Password (Optional)</Form.Label>
-                  <Form.Control
-                    type="password"
-                    value={profile.password}
-                    onChange={(event) =>
-                      setProfile((prev) => ({ ...prev, password: event.target.value }))
-                    }
-                    autoComplete="new-password"
-                    placeholder="Leave blank to keep current password"
-                  />
-                </Form.Group>
-              </Col>
-              <Col md={6} className="d-flex align-items-end">
-                <div className="text-muted" style={{ fontSize: "0.85rem" }}>
-                  Session user: {session?.username || session?.email || "Unknown"}
-                </div>
-              </Col>
-            </Row>
-
-            <div className="mt-4 d-flex gap-2">
-              <Button type="submit" variant="success" disabled={saving}>
-                {saving ? "Saving..." : "Save Profile"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline-secondary"
-                onClick={() => loadProfile({ forceFresh: true })}
-              >
-                Refresh
-              </Button>
-            </div>
-          </Form>
-        </Card.Body>
-      </Card>
+          <Card className="profile-request-card border-0 shadow-sm">
+            <Card.Body>
+              <h5 className="mb-2">Need to update something?</h5>
+              <p className="text-muted mb-2" style={{ fontSize: "0.92rem" }}>
+                Profile fields and password changes are restricted to administrators only.
+              </p>
+              <p className="mb-0" style={{ fontSize: "0.92rem" }}>
+                Send your request by email and include your username plus the exact changes needed.
+              </p>
+            </Card.Body>
+          </Card>
+        </Col>
+      </Row>
     </Container>
   );
 }

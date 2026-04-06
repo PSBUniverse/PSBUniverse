@@ -132,7 +132,7 @@ export default function WorkOrderPage({ params }) {
     <Container className="py-4" style={{ maxWidth: 900 }}>
       <div className="d-flex align-items-center mb-3">
         <Link href={`/gutter/${id}`} className="back-link me-3">
-          ΓåÉ Back to Project
+          <i className="bi bi-arrow-left" aria-hidden="true" /> Back to Project
         </Link>
         <div>
           <h2 className="mb-0">Work Order</h2>

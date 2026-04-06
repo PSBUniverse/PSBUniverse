@@ -1,17 +1,21 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   Col,
   Container,
   Form,
+  Modal,
   Row,
+  Tab,
   Table,
+  Tabs,
 } from "react-bootstrap";
 import {
   cacheReferenceData,
@@ -27,9 +31,12 @@ const ADMIN_APP_KEY = "admin-config";
 function getLabel(record, preferred = []) {
   const fields = [
     ...preferred,
-    "name",
     "role_name",
     "app_name",
+    "sts_name",
+    "comp_name",
+    "dept_name",
+    "name",
     "label",
     "code",
     "description",
@@ -56,11 +63,67 @@ function toNullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function formatDateTime(value) {
+  if (!value) return "--";
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return "--";
+  }
+}
+
+function emptyUserDraft() {
+  return {
+    user_id: null,
+    username: "",
+    email: "",
+    password: "",
+    first_name: "",
+    last_name: "",
+    phone: "",
+    address: "",
+    comp_id: "",
+    dept_id: "",
+    status_id: "",
+    is_active: true,
+  };
+}
+
+function emptyRoleDraft() {
+  return {
+    role_id: null,
+    role_name: "",
+    role_desc: "",
+    is_active: true,
+  };
+}
+
+function emptyApplicationDraft() {
+  return {
+    app_id: null,
+    app_name: "",
+    app_desc: "",
+    is_active: true,
+  };
+}
+
+function emptyAccessDraft() {
+  return {
+    uar_id: null,
+    user_id: "",
+    role_id: "",
+    app_id: "",
+    is_active: true,
+  };
+}
+
 export default function AdminUserMasterPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
+  const [feedback, setFeedback] = useState({ text: "", variant: "info" });
+  const [activeTab, setActiveTab] = useState("users");
+
   const [session, setSession] = useState(null);
   const [access, setAccess] = useState(null);
 
@@ -75,34 +138,84 @@ export default function AdminUserMasterPage() {
   const [users, setUsers] = useState([]);
   const [mappings, setMappings] = useState([]);
 
-  const [newUser, setNewUser] = useState({
-    username: "",
-    email: "",
-    password: "",
-    first_name: "",
-    last_name: "",
-    comp_id: "",
-    dept_id: "",
-    status_id: "",
-    is_active: true,
+  const [userModal, setUserModal] = useState({
+    show: false,
+    mode: "create",
+    draft: emptyUserDraft(),
   });
 
-  const [newRole, setNewRole] = useState({ name: "", code: "" });
-  const [newApp, setNewApp] = useState({ name: "", code: "" });
-  const [newMapping, setNewMapping] = useState({
-    user_id: "",
-    role_id: "",
-    app_id: "",
+  const [roleModal, setRoleModal] = useState({
+    show: false,
+    mode: "create",
+    draft: emptyRoleDraft(),
   });
 
-  const loadData = useCallback(async (options = {}) => {
-    const forceFresh = Boolean(options.forceFresh);
-    setLoading(true);
-    setMessage("");
+  const [applicationModal, setApplicationModal] = useState({
+    show: false,
+    mode: "create",
+    draft: emptyApplicationDraft(),
+  });
 
-    try {
-      const [sessionPayload, bootstrapPayload, usersPayload, mappingsPayload] =
-        await Promise.all([
+  const [accessModal, setAccessModal] = useState({
+    show: false,
+    mode: "create",
+    draft: emptyAccessDraft(),
+  });
+
+  const departmentOptionsByCompany = useMemo(() => {
+    return references.departments.reduce((map, department) => {
+      const key = String(department.comp_id || "");
+      if (!map[key]) map[key] = [];
+      map[key].push(department);
+      return map;
+    }, {});
+  }, [references.departments]);
+
+  const userLookup = useMemo(() => {
+    return new Map(users.map((user) => [String(user.user_id), user]));
+  }, [users]);
+
+  const roleLookup = useMemo(() => {
+    return new Map(references.roles.map((role) => [String(role.role_id), role]));
+  }, [references.roles]);
+
+  const applicationLookup = useMemo(() => {
+    return new Map(references.applications.map((app) => [String(app.app_id), app]));
+  }, [references.applications]);
+
+  const companyLookup = useMemo(() => {
+    return new Map(references.companies.map((company) => [String(company.comp_id), company]));
+  }, [references.companies]);
+
+  const departmentLookup = useMemo(() => {
+    return new Map(references.departments.map((department) => [String(department.dept_id), department]));
+  }, [references.departments]);
+
+  const statusLookup = useMemo(() => {
+    return new Map(references.statuses.map((status) => [String(status.status_id), status]));
+  }, [references.statuses]);
+
+  const userModalDepartmentOptions = useMemo(() => {
+    const compId = String(userModal.draft.comp_id || "");
+    return departmentOptionsByCompany[compId] || references.departments;
+  }, [departmentOptionsByCompany, references.departments, userModal.draft.comp_id]);
+
+  const setError = useCallback((text) => {
+    setFeedback({ text, variant: "danger" });
+  }, []);
+
+  const setInfo = useCallback((text, variant = "info") => {
+    setFeedback({ text, variant });
+  }, []);
+
+  const loadData = useCallback(
+    async (options = {}) => {
+      const forceFresh = Boolean(options.forceFresh);
+      setLoading(true);
+      setFeedback((prev) => ({ ...prev, text: "" }));
+
+      try {
+        const [sessionPayload, bootstrapPayload, usersPayload, mappingsPayload] = await Promise.all([
           getCachedJson({
             key: USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
             url: `/api/user-master/session?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
@@ -133,41 +246,33 @@ export default function AdminUserMasterPage() {
           }),
         ]);
 
-      setSession(sessionPayload.session || null);
-      setAccess(sessionPayload.access || null);
+        setSession(sessionPayload.session || null);
+        setAccess(sessionPayload.access || null);
 
-      const refs = {
-        companies: bootstrapPayload.companies || [],
-        departments: bootstrapPayload.departments || [],
-        statuses: bootstrapPayload.statuses || [],
-        roles: bootstrapPayload.roles || [],
-        applications: bootstrapPayload.applications || [],
-      };
+        setReferences({
+          companies: bootstrapPayload.companies || [],
+          departments: bootstrapPayload.departments || [],
+          statuses: bootstrapPayload.statuses || [],
+          roles: bootstrapPayload.roles || [],
+          applications: bootstrapPayload.applications || [],
+        });
 
-      setReferences(refs);
-      cacheReferenceData(bootstrapPayload);
+        cacheReferenceData(bootstrapPayload);
 
-      setUsers(usersPayload.users || []);
-      setMappings(mappingsPayload.mappings || []);
-    } catch (error) {
-      setMessage(error?.message || "Unable to load admin data");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+        setUsers(usersPayload.users || []);
+        setMappings(mappingsPayload.mappings || []);
+      } catch (error) {
+        setError(error?.message || "Unable to load configuration data");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [setError]
+  );
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
-
-  const departmentOptionsByCompany = useMemo(() => {
-    return references.departments.reduce((map, department) => {
-      const key = String(department.comp_id || "");
-      if (!map[key]) map[key] = [];
-      map[key].push(department);
-      return map;
-    }, {});
-  }, [references.departments]);
 
   async function callApi(url, method, body) {
     const response = await fetch(url, {
@@ -187,85 +292,113 @@ export default function AdminUserMasterPage() {
 
   async function handleLogout() {
     setBusy(true);
-    setMessage("");
+    setFeedback({ text: "", variant: "info" });
     try {
       await callApi("/api/auth/logout", "POST");
       clearSessionCache(ADMIN_APP_KEY);
       router.push("/login");
     } catch (error) {
-      setMessage(error?.message || "Logout failed");
+      setError(error?.message || "Logout failed");
     } finally {
       setBusy(false);
     }
   }
 
-  async function createUser() {
-    setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "POST",
-        {
-          ...newUser,
-          comp_id: toNullableNumber(newUser.comp_id),
-          dept_id: toNullableNumber(newUser.dept_id),
-          status_id: toNullableNumber(newUser.status_id),
-        }
-      );
+  function openCreateUserModal() {
+    setUserModal({
+      show: true,
+      mode: "create",
+      draft: emptyUserDraft(),
+    });
+  }
 
-      setNewUser({
-        username: "",
-        email: "",
+  function openEditUserModal(user) {
+    setUserModal({
+      show: true,
+      mode: "edit",
+      draft: {
+        user_id: user.user_id,
+        username: user.username || "",
+        email: user.email || "",
         password: "",
-        first_name: "",
-        last_name: "",
-        comp_id: "",
-        dept_id: "",
-        status_id: "",
-        is_active: true,
-      });
-
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.users,
-        USER_MASTER_CACHE_KEYS.bootstrap,
-      ]);
-      setMessage("User created.");
-      await loadData({ forceFresh: true });
-    } catch (error) {
-      setMessage(error?.message || "Unable to create user");
-    } finally {
-      setBusy(false);
-    }
+        first_name: user.first_name || "",
+        last_name: user.last_name || "",
+        phone: user.phone || "",
+        address: user.address || "",
+        comp_id: asSelectValue(user.comp_id),
+        dept_id: asSelectValue(user.dept_id),
+        status_id: asSelectValue(user.status_id),
+        is_active: Boolean(user.is_active),
+      },
+    });
   }
 
-  async function saveUserRow(user) {
-    setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          user_id: user.user_id,
-          username: user.username,
-          email: user.email,
-          first_name: user.first_name,
-          last_name: user.last_name,
-          phone: user.phone,
-          address: user.address,
-          comp_id: toNullableNumber(user.comp_id),
-          dept_id: toNullableNumber(user.dept_id),
-          status_id: toNullableNumber(user.status_id),
-          is_active: Boolean(user.is_active),
-        }
-      );
+  function closeUserModal() {
+    setUserModal((prev) => ({ ...prev, show: false }));
+  }
 
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users]);
-      setMessage("User updated.");
+  async function submitUserModal(event) {
+    event.preventDefault();
+
+    const draft = userModal.draft;
+
+    if (!String(draft.username || "").trim() && !String(draft.email || "").trim()) {
+      setError("Username or email is required.");
+      return;
+    }
+
+    if (userModal.mode === "create" && !String(draft.password || "").trim()) {
+      setError("Password is required when adding a user.");
+      return;
+    }
+
+    setBusy(true);
+    setFeedback({ text: "", variant: "info" });
+
+    try {
+      const payload = {
+        username: String(draft.username || "").trim() || null,
+        email: String(draft.email || "").trim() || null,
+        first_name: String(draft.first_name || "").trim() || null,
+        last_name: String(draft.last_name || "").trim() || null,
+        phone: String(draft.phone || "").trim() || null,
+        address: String(draft.address || "").trim() || null,
+        comp_id: toNullableNumber(draft.comp_id),
+        dept_id: toNullableNumber(draft.dept_id),
+        status_id: toNullableNumber(draft.status_id),
+        is_active: Boolean(draft.is_active),
+      };
+
+      if (userModal.mode === "create") {
+        await callApi(
+          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "POST",
+          {
+            ...payload,
+            password: String(draft.password || ""),
+          }
+        );
+
+        setInfo("User added.", "success");
+      } else {
+        await callApi(
+          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            user_id: draft.user_id,
+            ...payload,
+            ...(String(draft.password || "").trim() ? { password: String(draft.password) } : {}),
+          }
+        );
+
+        setInfo("User updated.", "success");
+      }
+
+      closeUserModal();
+      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users, USER_MASTER_CACHE_KEYS.bootstrap]);
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to update user");
+      setError(error?.message || "Unable to save user");
     } finally {
       setBusy(false);
     }
@@ -273,263 +406,332 @@ export default function AdminUserMasterPage() {
 
   async function deactivateUser(userId) {
     setBusy(true);
-    setMessage("");
+    setFeedback({ text: "", variant: "info" });
+
     try {
       await callApi(
-        `/api/user-master/admin/users?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}&user_id=${encodeURIComponent(userId)}`,
+        `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&user_id=${encodeURIComponent(userId)}`,
         "DELETE"
       );
 
       invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users]);
-      setMessage("User deactivated.");
+      setInfo("User deactivated.", "success");
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to deactivate user");
+      setError(error?.message || "Unable to deactivate user");
     } finally {
       setBusy(false);
     }
   }
 
-  async function createRole() {
-    if (!newRole.name.trim()) {
-      setMessage("Role name is required");
+  function openCreateRoleModal() {
+    setRoleModal({
+      show: true,
+      mode: "create",
+      draft: emptyRoleDraft(),
+    });
+  }
+
+  function openEditRoleModal(role) {
+    setRoleModal({
+      show: true,
+      mode: "edit",
+      draft: {
+        role_id: role.role_id,
+        role_name: role.role_name || "",
+        role_desc: role.role_desc || "",
+        is_active: role.is_active !== false,
+      },
+    });
+  }
+
+  function closeRoleModal() {
+    setRoleModal((prev) => ({ ...prev, show: false }));
+  }
+
+  async function submitRoleModal(event) {
+    event.preventDefault();
+
+    const draft = roleModal.draft;
+    if (!String(draft.role_name || "").trim()) {
+      setError("Role name is required.");
       return;
     }
 
     setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/roles?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "POST",
-        { name: newRole.name, code: newRole.code || null }
-      );
+    setFeedback({ text: "", variant: "info" });
 
-      setNewRole({ name: "", code: "" });
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.mappings,
-      ]);
-      setMessage("Role created.");
+    try {
+      const payload = {
+        role_name: String(draft.role_name || "").trim(),
+        role_desc: String(draft.role_desc || "").trim() || null,
+        is_active: Boolean(draft.is_active),
+      };
+
+      if (roleModal.mode === "create") {
+        await callApi(
+          `/api/user-master/admin/roles?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "POST",
+          payload
+        );
+        setInfo("Role added.", "success");
+      } else {
+        await callApi(
+          `/api/user-master/admin/roles?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            role_id: draft.role_id,
+            ...payload,
+          }
+        );
+        setInfo("Role updated.", "success");
+      }
+
+      closeRoleModal();
+      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to create role");
+      setError(error?.message || "Unable to save role");
     } finally {
       setBusy(false);
     }
   }
 
-  async function updateRole(role) {
+  async function deactivateRole(roleId) {
     setBusy(true);
-    setMessage("");
+    setFeedback({ text: "", variant: "info" });
+
     try {
       await callApi(
         `/api/user-master/admin/roles?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
         "PATCH",
         {
-          role_id: role.role_id,
-          name: role.name,
-          role_name: role.role_name,
-          code: role.code,
+          role_id: roleId,
+          is_active: false,
         }
       );
 
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.mappings,
-      ]);
-      setMessage("Role updated.");
+      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
+      setInfo("Role deactivated.", "success");
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to update role");
+      setError(error?.message || "Unable to deactivate role");
     } finally {
       setBusy(false);
     }
   }
 
-  async function deleteRole(roleId) {
-    setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/roles?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}&role_id=${encodeURIComponent(roleId)}`,
-        "DELETE"
-      );
-
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.mappings,
-      ]);
-      setMessage("Role deleted.");
-      await loadData({ forceFresh: true });
-    } catch (error) {
-      setMessage(error?.message || "Unable to delete role");
-    } finally {
-      setBusy(false);
-    }
+  function openCreateApplicationModal() {
+    setApplicationModal({
+      show: true,
+      mode: "create",
+      draft: emptyApplicationDraft(),
+    });
   }
 
-  async function createApplication() {
-    if (!newApp.name.trim()) {
-      setMessage("Application name is required");
+  function openEditApplicationModal(application) {
+    setApplicationModal({
+      show: true,
+      mode: "edit",
+      draft: {
+        app_id: application.app_id,
+        app_name: application.app_name || "",
+        app_desc: application.app_desc || "",
+        is_active: application.is_active !== false,
+      },
+    });
+  }
+
+  function closeApplicationModal() {
+    setApplicationModal((prev) => ({ ...prev, show: false }));
+  }
+
+  async function submitApplicationModal(event) {
+    event.preventDefault();
+
+    const draft = applicationModal.draft;
+    if (!String(draft.app_name || "").trim()) {
+      setError("Application name is required.");
       return;
     }
 
     setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/applications?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}`,
-        "POST",
-        { name: newApp.name, code: newApp.code || null }
-      );
+    setFeedback({ text: "", variant: "info" });
 
-      setNewApp({ name: "", code: "" });
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.mappings,
-      ]);
-      setMessage("Application created.");
+    try {
+      const payload = {
+        app_name: String(draft.app_name || "").trim(),
+        app_desc: String(draft.app_desc || "").trim() || null,
+        is_active: Boolean(draft.is_active),
+      };
+
+      if (applicationModal.mode === "create") {
+        await callApi(
+          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "POST",
+          payload
+        );
+        setInfo("Application added.", "success");
+      } else {
+        await callApi(
+          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            app_id: draft.app_id,
+            ...payload,
+          }
+        );
+        setInfo("Application updated.", "success");
+      }
+
+      closeApplicationModal();
+      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to create application");
+      setError(error?.message || "Unable to save application");
     } finally {
       setBusy(false);
     }
   }
 
-  async function updateApplication(app) {
+  async function deactivateApplication(appId) {
     setBusy(true);
-    setMessage("");
+    setFeedback({ text: "", variant: "info" });
+
     try {
       await callApi(
-        `/api/user-master/admin/applications?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}`,
+        `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
         "PATCH",
         {
-          app_id: app.app_id,
-          name: app.name,
-          app_name: app.app_name,
-          code: app.code,
+          app_id: appId,
+          is_active: false,
         }
       );
 
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.mappings,
-      ]);
-      setMessage("Application updated.");
+      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
+      setInfo("Application deactivated.", "success");
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to update application");
+      setError(error?.message || "Unable to deactivate application");
     } finally {
       setBusy(false);
     }
   }
 
-  async function deleteApplication(appId) {
-    setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/applications?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}&app_id=${encodeURIComponent(appId)}`,
-        "DELETE"
-      );
-
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.mappings,
-      ]);
-      setMessage("Application deleted.");
-      await loadData({ forceFresh: true });
-    } catch (error) {
-      setMessage(error?.message || "Unable to delete application");
-    } finally {
-      setBusy(false);
-    }
+  function openCreateAccessModal() {
+    setAccessModal({
+      show: true,
+      mode: "create",
+      draft: emptyAccessDraft(),
+    });
   }
 
-  async function addMapping() {
-    if (!newMapping.user_id || !newMapping.role_id || !newMapping.app_id) {
-      setMessage("Select user, role, and application first.");
+  function openEditAccessModal(mapping) {
+    setAccessModal({
+      show: true,
+      mode: "edit",
+      draft: {
+        uar_id: mapping.uar_id,
+        user_id: asSelectValue(mapping.user_id),
+        role_id: asSelectValue(mapping.role_id),
+        app_id: asSelectValue(mapping.app_id),
+        is_active: mapping.is_active !== false,
+      },
+    });
+  }
+
+  function closeAccessModal() {
+    setAccessModal((prev) => ({ ...prev, show: false }));
+  }
+
+  async function submitAccessModal(event) {
+    event.preventDefault();
+
+    const draft = accessModal.draft;
+    if (!draft.user_id || !draft.role_id || !draft.app_id) {
+      setError("User, role, and application are required.");
       return;
     }
 
     setBusy(true);
-    setMessage("");
-    try {
-      await callApi(
-        `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}`,
-        "POST",
-        {
-          user_id: toNullableNumber(newMapping.user_id),
-          role_id: toNullableNumber(newMapping.role_id),
-          app_id: toNullableNumber(newMapping.app_id),
-        }
-      );
+    setFeedback({ text: "", variant: "info" });
 
-      setNewMapping({ user_id: "", role_id: "", app_id: "" });
+    try {
+      const payload = {
+        user_id: toNullableNumber(draft.user_id),
+        role_id: toNullableNumber(draft.role_id),
+        app_id: toNullableNumber(draft.app_id),
+        is_active: Boolean(draft.is_active),
+      };
+
+      if (accessModal.mode === "create") {
+        await callApi(
+          `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "POST",
+          payload
+        );
+        setInfo("Access mapping added.", "success");
+      } else {
+        await callApi(
+          `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            uar_id: draft.uar_id,
+            ...payload,
+          }
+        );
+        setInfo("Access mapping updated.", "success");
+      }
+
+      closeAccessModal();
       invalidateUserMasterCache([
         USER_MASTER_CACHE_KEYS.mappings,
         USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
       ]);
-      setMessage("Access mapping saved.");
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to save mapping");
+      setError(error?.message || "Unable to save access mapping");
     } finally {
       setBusy(false);
     }
   }
 
-  async function removeMapping(mapping) {
+  async function deactivateAccessMapping(uarId) {
     setBusy(true);
-    setMessage("");
+    setFeedback({ text: "", variant: "info" });
+
     try {
       await callApi(
-        `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(
-          ADMIN_APP_KEY
-        )}&user_id=${encodeURIComponent(mapping.user_id)}&role_id=${encodeURIComponent(
-          mapping.role_id
-        )}&app_id=${encodeURIComponent(mapping.app_id)}`,
-        "DELETE"
+        `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+        "PATCH",
+        {
+          uar_id: uarId,
+          is_active: false,
+        }
       );
 
       invalidateUserMasterCache([
         USER_MASTER_CACHE_KEYS.mappings,
         USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
       ]);
-      setMessage("Access mapping removed.");
+      setInfo("Access mapping deactivated.", "success");
       await loadData({ forceFresh: true });
     } catch (error) {
-      setMessage(error?.message || "Unable to remove mapping");
+      setError(error?.message || "Unable to deactivate access mapping");
     } finally {
       setBusy(false);
     }
   }
 
   if (loading) {
-    return <Container className="py-4">Loading admin settings...</Container>;
+    return <Container className="py-4">Loading configuration...</Container>;
   }
 
   if (access && !access.permissions?.read && !access.isDevMain) {
     return (
       <Container className="py-4" style={{ maxWidth: 980 }}>
         <Alert variant="danger">
-          You do not have permission to access Admin Configuration for app key
-          {" "}
-          {ADMIN_APP_KEY}.
+          You do not have permission to access Configuration & Settings for app key {ADMIN_APP_KEY}.
         </Alert>
       </Container>
     );
@@ -540,13 +742,12 @@ export default function AdminUserMasterPage() {
       <div className="d-flex align-items-center mb-3 justify-content-between">
         <div className="d-flex align-items-center">
           <Link href="/" className="back-link me-3">
-            â† Back
+            <i className="bi bi-arrow-left" aria-hidden="true" /> Back
           </Link>
           <div>
-            <h2 className="mb-0">Devmain/Admin Configuration</h2>
+            <h2 className="mb-0">Configuration and Settings</h2>
             <p className="text-muted mb-0" style={{ fontSize: "0.86rem" }}>
-              Manage users, roles, applications, and role mappings from User
-              Master tables.
+              Manage User Master setup by target table.
             </p>
           </div>
         </div>
@@ -564,402 +765,140 @@ export default function AdminUserMasterPage() {
         </div>
       </div>
 
-      {message ? (
-        <Alert variant={message.endsWith(".") ? "info" : "danger"}>{message}</Alert>
-      ) : null}
+      {feedback.text ? <Alert variant={feedback.variant}>{feedback.text}</Alert> : null}
 
       <Alert variant="light" className="border">
-        <strong>Session User:</strong>{" "}
-        {session?.username || session?.email || "Unknown"} |{" "}
+        <strong>Session User:</strong> {session?.username || session?.email || "Unknown"} |{" "}
         <strong>Devmain:</strong> {access?.isDevMain ? "Yes" : "No"}
       </Alert>
 
-      <Card className="mb-4">
-        <Card.Header className="fw-bold">Users (psb_s_user)</Card.Header>
-        <Card.Body>
-          <Row className="g-2 mb-3">
-            <Col md={2}>
-              <Form.Control
-                placeholder="Username"
-                value={newUser.username}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, username: event.target.value }))
-                }
-              />
-            </Col>
-            <Col md={2}>
-              <Form.Control
-                placeholder="Email"
-                value={newUser.email}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, email: event.target.value }))
-                }
-              />
-            </Col>
-            <Col md={2}>
-              <Form.Control
-                type="password"
-                placeholder="Password"
-                value={newUser.password}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, password: event.target.value }))
-                }
-              />
-            </Col>
-            <Col md={2}>
-              <Form.Control
-                placeholder="First Name"
-                value={newUser.first_name}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, first_name: event.target.value }))
-                }
-              />
-            </Col>
-            <Col md={2}>
-              <Form.Control
-                placeholder="Last Name"
-                value={newUser.last_name}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, last_name: event.target.value }))
-                }
-              />
-            </Col>
-            <Col md={2}>
-              <Button variant="primary" className="w-100" onClick={createUser} disabled={busy}>
-                Create User
-              </Button>
-            </Col>
-          </Row>
-
-          <Row className="g-2 mb-3">
-            <Col md={4}>
-              <Form.Select
-                value={newUser.comp_id}
-                onChange={(event) =>
-                  setNewUser((prev) => ({
-                    ...prev,
-                    comp_id: event.target.value,
-                    dept_id: "",
-                  }))
-                }
-              >
-                <option value="">Company...</option>
-                {references.companies.map((company) => (
-                  <option key={String(company.comp_id)} value={String(company.comp_id)}>
-                    {getLabel(company, ["comp_name", "company_name"])}
-                  </option>
-                ))}
-              </Form.Select>
-            </Col>
-            <Col md={4}>
-              <Form.Select
-                value={newUser.dept_id}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, dept_id: event.target.value }))
-                }
-              >
-                <option value="">Department...</option>
-                {(departmentOptionsByCompany[newUser.comp_id] || references.departments).map(
-                  (department) => (
-                    <option
-                      key={String(department.dept_id)}
-                      value={String(department.dept_id)}
-                    >
-                      {getLabel(department, ["dept_name", "department_name"])}
-                    </option>
-                  )
-                )}
-              </Form.Select>
-            </Col>
-            <Col md={4}>
-              <Form.Select
-                value={newUser.status_id}
-                onChange={(event) =>
-                  setNewUser((prev) => ({ ...prev, status_id: event.target.value }))
-                }
-              >
-                <option value="">Status...</option>
-                {references.statuses.map((status) => (
-                  <option key={String(status.status_id)} value={String(status.status_id)}>
-                    {getLabel(status, ["status_name"])}
-                  </option>
-                ))}
-              </Form.Select>
-            </Col>
-          </Row>
-
-          <div style={{ overflowX: "auto" }}>
-            <Table size="sm" bordered hover>
-              <thead>
-                <tr>
-                  <th>User ID</th>
-                  <th>Username</th>
-                  <th>Email</th>
-                  <th>First Name</th>
-                  <th>Last Name</th>
-                  <th>Company</th>
-                  <th>Dept</th>
-                  <th>Status</th>
-                  <th>Active</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((user, index) => (
-                  <tr key={String(user.user_id)}>
-                    <td>{user.user_id}</td>
-                    <td>
-                      <Form.Control
-                        size="sm"
-                        value={user.username || ""}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = { ...next[index], username: event.target.value };
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <Form.Control
-                        size="sm"
-                        value={user.email || ""}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = { ...next[index], email: event.target.value };
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <Form.Control
-                        size="sm"
-                        value={user.first_name || ""}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = { ...next[index], first_name: event.target.value };
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <Form.Control
-                        size="sm"
-                        value={user.last_name || ""}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = { ...next[index], last_name: event.target.value };
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <Form.Select
-                        size="sm"
-                        value={asSelectValue(user.comp_id)}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = {
-                              ...next[index],
-                              comp_id: event.target.value,
-                              dept_id: "",
-                            };
-                            return next;
-                          })
-                        }
-                      >
-                        <option value="">--</option>
-                        {references.companies.map((company) => (
-                          <option key={String(company.comp_id)} value={String(company.comp_id)}>
-                            {getLabel(company, ["comp_name", "company_name"])}
-                          </option>
-                        ))}
-                      </Form.Select>
-                    </td>
-                    <td>
-                      <Form.Select
-                        size="sm"
-                        value={asSelectValue(user.dept_id)}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = { ...next[index], dept_id: event.target.value };
-                            return next;
-                          })
-                        }
-                      >
-                        <option value="">--</option>
-                        {(
-                          departmentOptionsByCompany[asSelectValue(user.comp_id)] ||
-                          references.departments
-                        ).map((department) => (
-                          <option
-                            key={String(department.dept_id)}
-                            value={String(department.dept_id)}
-                          >
-                            {getLabel(department, ["dept_name", "department_name"])}
-                          </option>
-                        ))}
-                      </Form.Select>
-                    </td>
-                    <td>
-                      <Form.Select
-                        size="sm"
-                        value={asSelectValue(user.status_id)}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = { ...next[index], status_id: event.target.value };
-                            return next;
-                          })
-                        }
-                      >
-                        <option value="">--</option>
-                        {references.statuses.map((status) => (
-                          <option key={String(status.status_id)} value={String(status.status_id)}>
-                            {getLabel(status, ["status_name"])}
-                          </option>
-                        ))}
-                      </Form.Select>
-                    </td>
-                    <td>
-                      <Form.Check
-                        checked={Boolean(user.is_active)}
-                        onChange={(event) =>
-                          setUsers((prev) => {
-                            const next = [...prev];
-                            next[index] = {
-                              ...next[index],
-                              is_active: event.target.checked,
-                            };
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td>
-                      <div className="d-flex gap-1">
-                        <Button
-                          size="sm"
-                          variant="outline-primary"
-                          onClick={() => saveUserRow(user)}
-                          disabled={busy}
-                        >
-                          Save
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline-danger"
-                          onClick={() => deactivateUser(user.user_id)}
-                          disabled={busy}
-                        >
-                          Deactivate
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          </div>
-        </Card.Body>
-      </Card>
-
-      <Row className="g-3 mb-4">
-        <Col lg={6}>
+      <Tabs
+        id="configuration-tabs"
+        activeKey={activeTab}
+        onSelect={(key) => setActiveTab(key || "users")}
+        className="mb-3"
+      >
+        <Tab eventKey="users" title="Users">
           <Card>
-            <Card.Header className="fw-bold">Roles (psb_s_role)</Card.Header>
+            <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
+              <span>Users (psb_s_user)</span>
+              <Button size="sm" onClick={openCreateUserModal} disabled={busy}>
+                Add User
+              </Button>
+            </Card.Header>
             <Card.Body>
-              <Row className="g-2 mb-3">
-                <Col md={5}>
-                  <Form.Control
-                    placeholder="Role name"
-                    value={newRole.name}
-                    onChange={(event) =>
-                      setNewRole((prev) => ({ ...prev, name: event.target.value }))
-                    }
-                  />
-                </Col>
-                <Col md={4}>
-                  <Form.Control
-                    placeholder="Role code"
-                    value={newRole.code}
-                    onChange={(event) =>
-                      setNewRole((prev) => ({ ...prev, code: event.target.value }))
-                    }
-                  />
-                </Col>
-                <Col md={3}>
-                  <Button className="w-100" onClick={createRole} disabled={busy}>
-                    Add Role
-                  </Button>
-                </Col>
-              </Row>
+              <div style={{ overflowX: "auto" }}>
+                <Table size="sm" bordered hover>
+                  <thead>
+                    <tr>
+                      <th>User ID</th>
+                      <th>Username</th>
+                      <th>Email</th>
+                      <th>Name</th>
+                      <th>Company</th>
+                      <th>Department</th>
+                      <th>Status</th>
+                      <th>Active</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {users.map((user) => {
+                      const company = companyLookup.get(String(user.comp_id || ""));
+                      const department = departmentLookup.get(String(user.dept_id || ""));
+                      const status = statusLookup.get(String(user.status_id || ""));
 
+                      return (
+                        <tr key={String(user.user_id)}>
+                          <td>{user.user_id}</td>
+                          <td>{user.username || "--"}</td>
+                          <td>{user.email || "--"}</td>
+                          <td>{[user.first_name, user.last_name].filter(Boolean).join(" ") || "--"}</td>
+                          <td>{company ? getLabel(company, ["comp_name"]) : "--"}</td>
+                          <td>{department ? getLabel(department, ["dept_name"]) : "--"}</td>
+                          <td>{status ? getLabel(status, ["sts_name", "status_name"]) : "--"}</td>
+                          <td>
+                            <Badge bg={user.is_active ? "success" : "secondary"}>
+                              {user.is_active ? "Active" : "Inactive"}
+                            </Badge>
+                          </td>
+                          <td>
+                            <div className="d-flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="outline-primary"
+                                onClick={() => openEditUserModal(user)}
+                                disabled={busy}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline-danger"
+                                onClick={() => deactivateUser(user.user_id)}
+                                disabled={busy || !user.is_active}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </Table>
+              </div>
+            </Card.Body>
+          </Card>
+        </Tab>
+
+        <Tab eventKey="roles" title="Roles">
+          <Card>
+            <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
+              <span>Roles (psb_s_role)</span>
+              <Button size="sm" onClick={openCreateRoleModal} disabled={busy}>
+                Add Role
+              </Button>
+            </Card.Header>
+            <Card.Body>
               <Table size="sm" bordered hover>
                 <thead>
                   <tr>
                     <th>Role ID</th>
-                    <th>Name</th>
-                    <th>Code</th>
+                    <th>Role Name</th>
+                    <th>Description</th>
+                    <th>Active</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {references.roles.map((role, index) => (
+                  {references.roles.map((role) => (
                     <tr key={String(role.role_id)}>
                       <td>{role.role_id}</td>
+                      <td>{role.role_name || "--"}</td>
+                      <td>{role.role_desc || "--"}</td>
                       <td>
-                        <Form.Control
-                          size="sm"
-                          value={role.name || role.role_name || ""}
-                          onChange={(event) =>
-                            setReferences((prev) => {
-                              const nextRoles = [...prev.roles];
-                              nextRoles[index] = { ...nextRoles[index], name: event.target.value };
-                              return { ...prev, roles: nextRoles };
-                            })
-                          }
-                        />
-                      </td>
-                      <td>
-                        <Form.Control
-                          size="sm"
-                          value={role.code || ""}
-                          onChange={(event) =>
-                            setReferences((prev) => {
-                              const nextRoles = [...prev.roles];
-                              nextRoles[index] = { ...nextRoles[index], code: event.target.value };
-                              return { ...prev, roles: nextRoles };
-                            })
-                          }
-                        />
+                        <Badge bg={role.is_active ? "success" : "secondary"}>
+                          {role.is_active ? "Active" : "Inactive"}
+                        </Badge>
                       </td>
                       <td>
                         <div className="d-flex gap-1">
                           <Button
                             size="sm"
                             variant="outline-primary"
-                            onClick={() => updateRole(role)}
+                            onClick={() => openEditRoleModal(role)}
                             disabled={busy}
                           >
-                            Save
+                            Edit
                           </Button>
                           <Button
                             size="sm"
                             variant="outline-danger"
-                            onClick={() => deleteRole(role.role_id)}
-                            disabled={busy}
+                            onClick={() => deactivateRole(role.role_id)}
+                            disabled={busy || !role.is_active}
                           >
-                            Delete
+                            Deactivate
                           </Button>
                         </div>
                       </td>
@@ -969,100 +908,55 @@ export default function AdminUserMasterPage() {
               </Table>
             </Card.Body>
           </Card>
-        </Col>
+        </Tab>
 
-        <Col lg={6}>
+        <Tab eventKey="applications" title="Applications">
           <Card>
-            <Card.Header className="fw-bold">Applications (psb_s_application)</Card.Header>
+            <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
+              <span>Applications (psb_s_application)</span>
+              <Button size="sm" onClick={openCreateApplicationModal} disabled={busy}>
+                Add Application
+              </Button>
+            </Card.Header>
             <Card.Body>
-              <Row className="g-2 mb-3">
-                <Col md={5}>
-                  <Form.Control
-                    placeholder="Application name"
-                    value={newApp.name}
-                    onChange={(event) =>
-                      setNewApp((prev) => ({ ...prev, name: event.target.value }))
-                    }
-                  />
-                </Col>
-                <Col md={4}>
-                  <Form.Control
-                    placeholder="Application code"
-                    value={newApp.code}
-                    onChange={(event) =>
-                      setNewApp((prev) => ({ ...prev, code: event.target.value }))
-                    }
-                  />
-                </Col>
-                <Col md={3}>
-                  <Button className="w-100" onClick={createApplication} disabled={busy}>
-                    Add App
-                  </Button>
-                </Col>
-              </Row>
-
               <Table size="sm" bordered hover>
                 <thead>
                   <tr>
                     <th>App ID</th>
-                    <th>Name</th>
-                    <th>Code</th>
+                    <th>Application Name</th>
+                    <th>Description</th>
+                    <th>Active</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {references.applications.map((application, index) => (
+                  {references.applications.map((application) => (
                     <tr key={String(application.app_id)}>
                       <td>{application.app_id}</td>
+                      <td>{application.app_name || "--"}</td>
+                      <td>{application.app_desc || "--"}</td>
                       <td>
-                        <Form.Control
-                          size="sm"
-                          value={application.name || application.app_name || ""}
-                          onChange={(event) =>
-                            setReferences((prev) => {
-                              const nextApps = [...prev.applications];
-                              nextApps[index] = {
-                                ...nextApps[index],
-                                name: event.target.value,
-                              };
-                              return { ...prev, applications: nextApps };
-                            })
-                          }
-                        />
-                      </td>
-                      <td>
-                        <Form.Control
-                          size="sm"
-                          value={application.code || ""}
-                          onChange={(event) =>
-                            setReferences((prev) => {
-                              const nextApps = [...prev.applications];
-                              nextApps[index] = {
-                                ...nextApps[index],
-                                code: event.target.value,
-                              };
-                              return { ...prev, applications: nextApps };
-                            })
-                          }
-                        />
+                        <Badge bg={application.is_active ? "success" : "secondary"}>
+                          {application.is_active ? "Active" : "Inactive"}
+                        </Badge>
                       </td>
                       <td>
                         <div className="d-flex gap-1">
                           <Button
                             size="sm"
                             variant="outline-primary"
-                            onClick={() => updateApplication(application)}
+                            onClick={() => openEditApplicationModal(application)}
                             disabled={busy}
                           >
-                            Save
+                            Edit
                           </Button>
                           <Button
                             size="sm"
                             variant="outline-danger"
-                            onClick={() => deleteApplication(application.app_id)}
-                            disabled={busy}
+                            onClick={() => deactivateApplication(application.app_id)}
+                            disabled={busy || !application.is_active}
                           >
-                            Delete
+                            Deactivate
                           </Button>
                         </div>
                       </td>
@@ -1072,120 +966,514 @@ export default function AdminUserMasterPage() {
               </Table>
             </Card.Body>
           </Card>
-        </Col>
-      </Row>
+        </Tab>
 
-      <Card>
-        <Card.Header className="fw-bold">
-          Access Mappings (psb_m_userappproleaccess)
-        </Card.Header>
-        <Card.Body>
-          <Row className="g-2 mb-3">
-            <Col md={4}>
-              <Form.Select
-                value={newMapping.user_id}
+        <Tab eventKey="access" title="Access">
+          <Card>
+            <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
+              <span>Access Mappings (psb_m_userapproleaccess)</span>
+              <Button size="sm" onClick={openCreateAccessModal} disabled={busy}>
+                Add Access
+              </Button>
+            </Card.Header>
+            <Card.Body>
+              <div style={{ overflowX: "auto" }}>
+                <Table size="sm" bordered hover>
+                  <thead>
+                    <tr>
+                      <th>Mapping ID</th>
+                      <th>User</th>
+                      <th>Role</th>
+                      <th>Application</th>
+                      <th>Active</th>
+                      <th>Created At</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mappings.map((mapping) => {
+                      const user = userLookup.get(String(mapping.user_id || ""));
+                      const role = roleLookup.get(String(mapping.role_id || ""));
+                      const application = applicationLookup.get(String(mapping.app_id || ""));
+
+                      const userLabel =
+                        user?.username || user?.email || `User ${String(mapping.user_id)}`;
+                      const roleLabel = role ? getLabel(role, ["role_name"]) : mapping.role_id;
+                      const appLabel = application
+                        ? getLabel(application, ["app_name"])
+                        : mapping.app_id;
+
+                      return (
+                        <tr key={String(mapping.uar_id)}>
+                          <td>{mapping.uar_id}</td>
+                          <td>{userLabel}</td>
+                          <td>{roleLabel}</td>
+                          <td>{appLabel}</td>
+                          <td>
+                            <Badge bg={mapping.is_active ? "success" : "secondary"}>
+                              {mapping.is_active ? "Active" : "Inactive"}
+                            </Badge>
+                          </td>
+                          <td>{formatDateTime(mapping.created_at)}</td>
+                          <td>
+                            <div className="d-flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="outline-primary"
+                                onClick={() => openEditAccessModal(mapping)}
+                                disabled={busy}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline-danger"
+                                onClick={() => deactivateAccessMapping(mapping.uar_id)}
+                                disabled={busy || !mapping.is_active}
+                              >
+                                Deactivate
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </Table>
+              </div>
+            </Card.Body>
+          </Card>
+        </Tab>
+      </Tabs>
+
+      <Modal show={userModal.show} onHide={closeUserModal} centered size="lg">
+        <Form onSubmit={submitUserModal}>
+          <Modal.Header closeButton>
+            <Modal.Title>
+              {userModal.mode === "create" ? "Add User" : "Edit User"}
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <Row className="g-3">
+              <Col md={6}>
+                <Form.Group>
+                  <Form.Label>Username</Form.Label>
+                  <Form.Control
+                    value={userModal.draft.username}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, username: event.target.value },
+                      }))
+                    }
+                  />
+                </Form.Group>
+              </Col>
+              <Col md={6}>
+                <Form.Group>
+                  <Form.Label>Email</Form.Label>
+                  <Form.Control
+                    type="email"
+                    value={userModal.draft.email}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, email: event.target.value },
+                      }))
+                    }
+                  />
+                </Form.Group>
+              </Col>
+
+              <Col md={6}>
+                <Form.Group>
+                  <Form.Label>
+                    Password {userModal.mode === "create" ? "(required)" : "(optional)"}
+                  </Form.Label>
+                  <Form.Control
+                    type="password"
+                    value={userModal.draft.password}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, password: event.target.value },
+                      }))
+                    }
+                    placeholder={
+                      userModal.mode === "create"
+                        ? "Enter password"
+                        : "Leave blank to keep existing password"
+                    }
+                  />
+                </Form.Group>
+              </Col>
+
+              <Col md={6}>
+                <Form.Group>
+                  <Form.Label>First Name</Form.Label>
+                  <Form.Control
+                    value={userModal.draft.first_name}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, first_name: event.target.value },
+                      }))
+                    }
+                  />
+                </Form.Group>
+              </Col>
+
+              <Col md={6}>
+                <Form.Group>
+                  <Form.Label>Last Name</Form.Label>
+                  <Form.Control
+                    value={userModal.draft.last_name}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, last_name: event.target.value },
+                      }))
+                    }
+                  />
+                </Form.Group>
+              </Col>
+
+              <Col md={6}>
+                <Form.Group>
+                  <Form.Label>Phone</Form.Label>
+                  <Form.Control
+                    value={userModal.draft.phone}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, phone: event.target.value },
+                      }))
+                    }
+                  />
+                </Form.Group>
+              </Col>
+
+              <Col md={12}>
+                <Form.Group>
+                  <Form.Label>Address</Form.Label>
+                  <Form.Control
+                    value={userModal.draft.address}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, address: event.target.value },
+                      }))
+                    }
+                  />
+                </Form.Group>
+              </Col>
+
+              <Col md={4}>
+                <Form.Group>
+                  <Form.Label>Company</Form.Label>
+                  <Form.Select
+                    value={userModal.draft.comp_id}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: {
+                          ...prev.draft,
+                          comp_id: event.target.value,
+                          dept_id: "",
+                        },
+                      }))
+                    }
+                  >
+                    <option value="">Select company...</option>
+                    {references.companies.map((company) => (
+                      <option key={String(company.comp_id)} value={String(company.comp_id)}>
+                        {getLabel(company, ["comp_name"]) }
+                      </option>
+                    ))}
+                  </Form.Select>
+                </Form.Group>
+              </Col>
+
+              <Col md={4}>
+                <Form.Group>
+                  <Form.Label>Department</Form.Label>
+                  <Form.Select
+                    value={userModal.draft.dept_id}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, dept_id: event.target.value },
+                      }))
+                    }
+                  >
+                    <option value="">Select department...</option>
+                    {userModalDepartmentOptions.map((department) => (
+                      <option key={String(department.dept_id)} value={String(department.dept_id)}>
+                        {getLabel(department, ["dept_name"])}
+                      </option>
+                    ))}
+                  </Form.Select>
+                </Form.Group>
+              </Col>
+
+              <Col md={4}>
+                <Form.Group>
+                  <Form.Label>Status</Form.Label>
+                  <Form.Select
+                    value={userModal.draft.status_id}
+                    onChange={(event) =>
+                      setUserModal((prev) => ({
+                        ...prev,
+                        draft: { ...prev.draft, status_id: event.target.value },
+                      }))
+                    }
+                  >
+                    <option value="">Select status...</option>
+                    {references.statuses.map((status) => (
+                      <option key={String(status.status_id)} value={String(status.status_id)}>
+                        {getLabel(status, ["sts_name", "status_name"])}
+                      </option>
+                    ))}
+                  </Form.Select>
+                </Form.Group>
+              </Col>
+
+              <Col md={12}>
+                <Form.Check
+                  type="switch"
+                  label="Active"
+                  checked={Boolean(userModal.draft.is_active)}
+                  onChange={(event) =>
+                    setUserModal((prev) => ({
+                      ...prev,
+                      draft: { ...prev.draft, is_active: event.target.checked },
+                    }))
+                  }
+                />
+              </Col>
+            </Row>
+          </Modal.Body>
+          <Modal.Footer>
+            <Button variant="outline-secondary" onClick={closeUserModal} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Saving..." : userModal.mode === "create" ? "Add User" : "Save Changes"}
+            </Button>
+          </Modal.Footer>
+        </Form>
+      </Modal>
+
+      <Modal show={roleModal.show} onHide={closeRoleModal} centered>
+        <Form onSubmit={submitRoleModal}>
+          <Modal.Header closeButton>
+            <Modal.Title>{roleModal.mode === "create" ? "Add Role" : "Edit Role"}</Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <Form.Group className="mb-3">
+              <Form.Label>Role Name</Form.Label>
+              <Form.Control
+                value={roleModal.draft.role_name}
                 onChange={(event) =>
-                  setNewMapping((prev) => ({ ...prev, user_id: event.target.value }))
+                  setRoleModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, role_name: event.target.value },
+                  }))
+                }
+              />
+            </Form.Group>
+
+            <Form.Group className="mb-3">
+              <Form.Label>Description</Form.Label>
+              <Form.Control
+                value={roleModal.draft.role_desc}
+                onChange={(event) =>
+                  setRoleModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, role_desc: event.target.value },
+                  }))
+                }
+              />
+            </Form.Group>
+
+            <Form.Check
+              type="switch"
+              label="Active"
+              checked={Boolean(roleModal.draft.is_active)}
+              onChange={(event) =>
+                setRoleModal((prev) => ({
+                  ...prev,
+                  draft: { ...prev.draft, is_active: event.target.checked },
+                }))
+              }
+            />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button variant="outline-secondary" onClick={closeRoleModal} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy ? "Saving..." : roleModal.mode === "create" ? "Add Role" : "Save Changes"}
+            </Button>
+          </Modal.Footer>
+        </Form>
+      </Modal>
+
+      <Modal show={applicationModal.show} onHide={closeApplicationModal} centered>
+        <Form onSubmit={submitApplicationModal}>
+          <Modal.Header closeButton>
+            <Modal.Title>
+              {applicationModal.mode === "create" ? "Add Application" : "Edit Application"}
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <Form.Group className="mb-3">
+              <Form.Label>Application Name</Form.Label>
+              <Form.Control
+                value={applicationModal.draft.app_name}
+                onChange={(event) =>
+                  setApplicationModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, app_name: event.target.value },
+                  }))
+                }
+              />
+            </Form.Group>
+
+            <Form.Group className="mb-3">
+              <Form.Label>Description</Form.Label>
+              <Form.Control
+                value={applicationModal.draft.app_desc}
+                onChange={(event) =>
+                  setApplicationModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, app_desc: event.target.value },
+                  }))
+                }
+              />
+            </Form.Group>
+
+            <Form.Check
+              type="switch"
+              label="Active"
+              checked={Boolean(applicationModal.draft.is_active)}
+              onChange={(event) =>
+                setApplicationModal((prev) => ({
+                  ...prev,
+                  draft: { ...prev.draft, is_active: event.target.checked },
+                }))
+              }
+            />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button variant="outline-secondary" onClick={closeApplicationModal} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy
+                ? "Saving..."
+                : applicationModal.mode === "create"
+                ? "Add Application"
+                : "Save Changes"}
+            </Button>
+          </Modal.Footer>
+        </Form>
+      </Modal>
+
+      <Modal show={accessModal.show} onHide={closeAccessModal} centered>
+        <Form onSubmit={submitAccessModal}>
+          <Modal.Header closeButton>
+            <Modal.Title>
+              {accessModal.mode === "create" ? "Add Access Mapping" : "Edit Access Mapping"}
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <Form.Group className="mb-3">
+              <Form.Label>User</Form.Label>
+              <Form.Select
+                value={accessModal.draft.user_id}
+                onChange={(event) =>
+                  setAccessModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, user_id: event.target.value },
+                  }))
                 }
               >
-                <option value="">User...</option>
+                <option value="">Select user...</option>
                 {users.map((user) => (
                   <option key={String(user.user_id)} value={String(user.user_id)}>
                     {user.username || user.email || `User ${user.user_id}`}
                   </option>
                 ))}
               </Form.Select>
-            </Col>
-            <Col md={4}>
+            </Form.Group>
+
+            <Form.Group className="mb-3">
+              <Form.Label>Role</Form.Label>
               <Form.Select
-                value={newMapping.role_id}
+                value={accessModal.draft.role_id}
                 onChange={(event) =>
-                  setNewMapping((prev) => ({ ...prev, role_id: event.target.value }))
+                  setAccessModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, role_id: event.target.value },
+                  }))
                 }
               >
-                <option value="">Role...</option>
+                <option value="">Select role...</option>
                 {references.roles.map((role) => (
                   <option key={String(role.role_id)} value={String(role.role_id)}>
                     {getLabel(role, ["role_name"])}
                   </option>
                 ))}
               </Form.Select>
-            </Col>
-            <Col md={3}>
+            </Form.Group>
+
+            <Form.Group className="mb-3">
+              <Form.Label>Application</Form.Label>
               <Form.Select
-                value={newMapping.app_id}
+                value={accessModal.draft.app_id}
                 onChange={(event) =>
-                  setNewMapping((prev) => ({ ...prev, app_id: event.target.value }))
+                  setAccessModal((prev) => ({
+                    ...prev,
+                    draft: { ...prev.draft, app_id: event.target.value },
+                  }))
                 }
               >
-                <option value="">Application...</option>
+                <option value="">Select application...</option>
                 {references.applications.map((application) => (
                   <option key={String(application.app_id)} value={String(application.app_id)}>
                     {getLabel(application, ["app_name"])}
                   </option>
                 ))}
               </Form.Select>
-            </Col>
-            <Col md={1}>
-              <Button className="w-100" onClick={addMapping} disabled={busy}>
-                Add
-              </Button>
-            </Col>
-          </Row>
+            </Form.Group>
 
-          <Table size="sm" bordered hover>
-            <thead>
-              <tr>
-                <th>User</th>
-                <th>Role</th>
-                <th>Application</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {mappings.map((mapping) => {
-                const userLabel =
-                  users.find((user) => String(user.user_id) === String(mapping.user_id))
-                    ?.username ||
-                  users.find((user) => String(user.user_id) === String(mapping.user_id))
-                    ?.email ||
-                  mapping.user_id;
-
-                const roleLabel =
-                  references.roles.find(
-                    (role) => String(role.role_id) === String(mapping.role_id)
-                  ) || null;
-
-                const appLabel =
-                  references.applications.find(
-                    (app) => String(app.app_id) === String(mapping.app_id)
-                  ) || null;
-
-                return (
-                  <tr
-                    key={`${mapping.user_id}:${mapping.role_id}:${mapping.app_id}`}
-                  >
-                    <td>{userLabel}</td>
-                    <td>{roleLabel ? getLabel(roleLabel, ["role_name"]) : mapping.role_id}</td>
-                    <td>{appLabel ? getLabel(appLabel, ["app_name"]) : mapping.app_id}</td>
-                    <td>
-                      <Button
-                        size="sm"
-                        variant="outline-danger"
-                        onClick={() => removeMapping(mapping)}
-                        disabled={busy}
-                      >
-                        Remove
-                      </Button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </Table>
-        </Card.Body>
-      </Card>
+            <Form.Check
+              type="switch"
+              label="Active"
+              checked={Boolean(accessModal.draft.is_active)}
+              onChange={(event) =>
+                setAccessModal((prev) => ({
+                  ...prev,
+                  draft: { ...prev.draft, is_active: event.target.checked },
+                }))
+              }
+            />
+          </Modal.Body>
+          <Modal.Footer>
+            <Button variant="outline-secondary" onClick={closeAccessModal} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy}>
+              {busy
+                ? "Saving..."
+                : accessModal.mode === "create"
+                ? "Add Access"
+                : "Save Changes"}
+            </Button>
+          </Modal.Footer>
+        </Form>
+      </Modal>
     </Container>
   );
 }
-
