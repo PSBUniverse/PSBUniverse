@@ -59,7 +59,11 @@ export default function LoginPage() {
       return "Account is inactive. Contact administrator.";
     }
 
-    if (text.includes("required")) {
+    if (text.includes("supabase") && text.includes("missing")) {
+      return "Login is unavailable due to server configuration. Add Supabase server environment variables in Vercel.";
+    }
+
+    if (text.includes("required") && text.includes("username") && text.includes("password")) {
       return "Please enter both username and password.";
     }
 
