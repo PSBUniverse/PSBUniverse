@@ -792,10 +792,10 @@ export default function GutterProjectForm({ mode = "create", projectId = null })
         cstm_manufacturer_rate: project.manualManufacturerRateEnabled
           ? toNumOrNull(project.manualManufacturerRate)
           : null,
-        cstm_discount_percentage: project.manualDiscountRateEnabled
+        cstm_discount_percentage: project.discountIncluded && project.manualDiscountRateEnabled
           ? normalizePercentRateValue(project.manualDiscountPercent)
           : null,
-        cstm_leaf_guard_price: project.manualLeafGuardRateEnabled
+        cstm_leaf_guard_price: project.leafGuardIncluded && project.manualLeafGuardRateEnabled
           ? toNumOrNull(project.manualLeafGuardRate)
           : null,
         deposit_percent: project.depositIncluded ? toNumOrNull(project.depositPercent) : null,
@@ -947,6 +947,13 @@ export default function GutterProjectForm({ mode = "create", projectId = null })
     typeof n === "number"
       ? n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
       : "—";
+
+  const fmtFootage = (n) => {
+    const numeric = Number(n || 0);
+    return Number.isFinite(numeric)
+      ? numeric.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })
+      : "0";
+  };
 
   const fmtCurrency = (n) => `$${fmt(Number(n || 0))}`;
 
@@ -1654,9 +1661,15 @@ export default function GutterProjectForm({ mode = "create", projectId = null })
                         <span>Gutter k Style 6 Inch</span>
                         <span className="quote-price-value" style={moneyValueStyle}>{fmtCurrency(quoteResult.pricing.materialCost)}</span>
                       </div>
+                      <div className="quote-price-subline">
+                        Total Gutter FT ({fmtFootage(quoteResult.pricing.totalGutter)})
+                      </div>
                       <div className="quote-price-row">
                         <span>3x4 Downspouts</span>
                         <span className="quote-price-value" style={moneyValueStyle}>{fmtCurrency(quoteResult.pricing.downspoutCost)}</span>
+                      </div>
+                      <div className="quote-price-subline">
+                        Total Downspout FT ({fmtFootage(quoteResult.pricing.totalDownspouts)})
                       </div>
                       {Number(quoteResult.pricing.leafGuardCost || 0) > 0 && (
                         <div className="quote-price-row">
@@ -1670,17 +1683,6 @@ export default function GutterProjectForm({ mode = "create", projectId = null })
                           <span className="quote-price-value" style={moneyValueStyle}>{fmtCurrency(quoteResult.pricing.extrasPrice)}</span>
                         </div>
                       )}
-
-                      <div className="quote-price-gap" />
-
-                      <div className="quote-price-row quote-metric-row">
-                        <span>Total Gutter FT</span>
-                        <span className="quote-price-value" style={moneyValueStyle}>{fmt(quoteResult.pricing.totalGutter)} FT</span>
-                      </div>
-                      <div className="quote-price-row quote-metric-row">
-                        <span>Total Downspout FT</span>
-                        <span className="quote-price-value" style={moneyValueStyle}>{fmt(quoteResult.pricing.totalDownspouts)} FT</span>
-                      </div>
 
                       <div className="quote-price-gap" />
 

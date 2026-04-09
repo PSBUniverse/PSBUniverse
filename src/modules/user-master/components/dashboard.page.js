@@ -2,10 +2,16 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { Container, Row, Col, Card } from "react-bootstrap";
+import psbLogo from "@/styles/psb_logo_notitle.png";
+import { createCacheKey, getOrFetchCached } from "@/core/cache/adapters/browser-cache.adapter";
 
 const DEFAULT_CARD_ICON = "bi-grid-3x3-gap";
 const DEFAULT_GROUP_ICON = "bi-collection";
+const MY_APPS_CACHE_NAMESPACE = "user-master";
+const MY_APPS_CACHE_TTL_MS = 2 * 60 * 1000;
+const MY_APPS_CACHE_KEY = createCacheKey("my-apps", "dashboard");
 
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
@@ -49,79 +55,94 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [groups, setGroups] = useState([]);
+  const [noModulesAssigned, setNoModulesAssigned] = useState(false);
 
   const hasGroups = useMemo(() => groups.length > 0, [groups]);
 
   useEffect(() => {
+    let cancelled = false;
+
     async function loadApps() {
       setLoading(true);
       setErrorMessage("");
+      setNoModulesAssigned(false);
 
       try {
-        const response = await fetch("/api/my-apps", {
-          method: "GET",
-          cache: "no-store",
+        const cachedResult = await getOrFetchCached({
+          key: MY_APPS_CACHE_KEY,
+          namespace: MY_APPS_CACHE_NAMESPACE,
+          ttlMs: MY_APPS_CACHE_TTL_MS,
+          allowStaleOnError: true,
+          fetcher: async () => {
+            const response = await fetch("/api/my-apps", {
+              method: "GET",
+              cache: "no-store",
+            });
+
+            const payload = await response.json().catch(() => null);
+            if (!response.ok) {
+              throw new Error(
+                payload?.message || "Unable to load your applications. Please try again."
+              );
+            }
+
+            return payload || {};
+          },
         });
 
-        const payload = await response.json().catch(() => null);
+        if (cancelled) return;
 
-        if (!response.ok) {
-          setGroups([]);
-          setErrorMessage(
-            payload?.message || "Unable to load your applications. Please try again."
-          );
-          return;
-        }
+        const payload = cachedResult?.data || {};
 
-        setGroups(normalizeGroups(payload));
-      } catch {
+        const normalizedGroups = normalizeGroups(payload);
+        setGroups(normalizedGroups);
+        setNoModulesAssigned(Boolean(payload?.noModulesAssigned));
+      } catch (error) {
+        if (cancelled) return;
         setGroups([]);
-        setErrorMessage("Unable to load your applications. Please try again.");
+        setNoModulesAssigned(false);
+        setErrorMessage(error?.message || "Unable to load your applications. Please try again.");
       } finally {
+        if (cancelled) return;
         setLoading(false);
       }
     }
 
     void loadApps();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
     <Container className="py-4" style={{ maxWidth: 1200 }}>
-      <div
-        className="p-4 mb-4 rounded-3"
-        style={{
-          background: "linear-gradient(145deg, #ffffff 0%, #f3f8fc 72%)",
-          border: "1px solid #b4c7d9",
-        }}
-      >
-        <Row>
+      <div className="my-apps-portal-hero mb-4 rounded-3">
+        <Row className="align-items-center g-3">
           <Col md={7}>
-            <p
-              className="text-muted text-uppercase mb-1"
-              style={{ letterSpacing: "0.08em" }}
-            >
-              PSB Portal
-            </p>
-            <h1 className="fw-bold">Quote Engine</h1>
-            <p className="text-muted mt-2">
-              Premium Gutters and Doors quoting workspace. Select an area below
-              to continue.
+            <div className="my-apps-portal-title-row">
+              <Image src={psbLogo} alt="PSBUniverse logo" className="my-apps-portal-logo" />
+              <h1 className="my-apps-portal-title mb-0">PSBUniverse Portal</h1>
+            </div>
+            <p className="my-apps-portal-subtitle mb-1">All Applications Workspace</p>
+            <p className="my-apps-portal-copy mb-0">
+              Access and manage all your assigned applications in one place.
             </p>
           </Col>
           <Col md={5}>
-            <Card className="shadow-sm">
+            <Card className="my-apps-org-card">
               <Card.Body>
-                <p className="fw-bold mb-0">Premium Steel Building</p>
-                <p
-                  className="text-muted text-uppercase mb-2"
-                  style={{ letterSpacing: "0.25em" }}
-                >
+                <p className="my-apps-org-name mb-1">Premium Steel Building</p>
+                <p className="my-apps-org-tagline mb-2">
                   Premium Gutters and Doors
                 </p>
-                <p className="mb-0">
-                  <strong>Email:</strong> Sales.pgd@premiumsteelgroup.com
-                  <br />
-                  <strong>Phone:</strong> 817-502-2520
+                <p className="my-apps-org-contact-row mb-1">
+                  <i className="bi bi-envelope-at-fill" aria-hidden="true" />
+                  <span>Sales.pgd@premiumsteelgroup.com</span>
+                </p>
+                <p className="my-apps-org-contact-row mb-0">
+                  <i className="bi bi-telephone-fill" aria-hidden="true" />
+                  <span>817-502-2520</span>
                 </p>
               </Card.Body>
             </Card>
@@ -152,9 +173,17 @@ export default function HomePage() {
       ) : hasValue(errorMessage) ? (
         <div className="notice-banner notice-banner-danger mb-0">{errorMessage}</div>
       ) : !hasGroups ? (
-        <div className="notice-banner notice-banner-warning mb-0">
-          No application modules are currently assigned to your account.
-        </div>
+        noModulesAssigned ? (
+          <div className="notice-banner notice-banner-warning mb-0">
+            <strong className="d-block">No modules assigned.</strong>
+            <span>Your app access is active, but no modules are currently assigned.</span>
+          </div>
+        ) : (
+          <div className="notice-banner notice-banner-warning mb-0">
+            <strong className="d-block">No applications assigned yet.</strong>
+            <span>Please contact your administrator to get access.</span>
+          </div>
+        )
       ) : (
         groups.map((group) => (
           <div key={`group-${group.group_id || group.group_name}`} className="mb-4">

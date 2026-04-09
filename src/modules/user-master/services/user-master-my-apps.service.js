@@ -173,7 +173,7 @@ function toGroupedResponse(groups, cards) {
     .filter((group) => group.cards.length > 0);
 }
 
-async function getActiveUserAppIds({ supabaseClient, userId, appId }) {
+async function getActiveUserAppRoles({ supabaseClient, userId, appId }) {
   let query = supabaseClient
     .from(USER_MASTER_TABLES.userAppRoleAccess)
     .select("*")
@@ -183,15 +183,100 @@ async function getActiveUserAppIds({ supabaseClient, userId, appId }) {
     query = query.eq(USER_MASTER_COLUMNS.appId, appId);
   }
 
-  const { data, error } = await query;
-  if (error) throw new Error(error.message || "Unable to load user roles");
+  const { data: roleMappingRows, error: roleMappingError } = await query;
+  if (roleMappingError) throw new Error(roleMappingError.message || "Unable to load user roles");
 
-  const activeRows = (data || []).filter((row) => isMappingActive(row));
+  const activeRoleRows = (roleMappingRows || [])
+    .filter((row) => isMappingActive(row))
+    .map((row) => ({
+      app_id: asText(row?.[USER_MASTER_COLUMNS.appId]),
+      role_id: asText(row?.[USER_MASTER_COLUMNS.roleId]),
+    }))
+    .filter((row) => hasValue(row.app_id) && hasValue(row.role_id));
 
-  return uniqueTextValues(activeRows.map((row) => row?.[USER_MASTER_COLUMNS.appId]));
+  const roleMappedAppIds = uniqueTextValues(activeRoleRows.map((row) => row.app_id));
+
+  if (roleMappedAppIds.length === 0) {
+    return { appIds: [], roleIdsByApp: new Map(), appsWithoutModules: [] };
+  }
+
+  const candidateAppIds = roleMappedAppIds;
+  const roleIds = uniqueTextValues(activeRoleRows.map((row) => row.role_id));
+
+  if (candidateAppIds.length === 0) {
+    return { appIds: [], roleIdsByApp: new Map(), appsWithoutModules: [] };
+  }
+
+  const [
+    { data: activeApps, error: appError },
+    { data: activeRoles, error: roleError },
+  ] = await Promise.all([
+    supabaseClient
+      .from(USER_MASTER_TABLES.applications)
+      .select(`${USER_MASTER_COLUMNS.appId}`)
+      .in(USER_MASTER_COLUMNS.appId, candidateAppIds)
+      .eq("is_active", true),
+    supabaseClient
+      .from(USER_MASTER_TABLES.roles)
+      .select(`${USER_MASTER_COLUMNS.roleId}, ${USER_MASTER_COLUMNS.appId}`)
+      .in(USER_MASTER_COLUMNS.roleId, roleIds)
+      .eq("is_active", true),
+  ]);
+
+  if (appError) throw new Error(appError.message || "Unable to load applications");
+  if (roleError) throw new Error(roleError.message || "Unable to load roles");
+
+  const activeAppSet = new Set(
+    uniqueTextValues((activeApps || []).map((row) => row?.[USER_MASTER_COLUMNS.appId]))
+  );
+
+  const activeRoleSet = new Set(
+    uniqueTextValues((activeRoles || []).map((row) => row?.[USER_MASTER_COLUMNS.roleId]))
+  );
+
+  const effectiveAppSet = new Set(
+    uniqueTextValues(activeRoleRows.map((row) => row.app_id)).filter((mappedAppId) =>
+      activeAppSet.has(mappedAppId)
+    )
+  );
+
+  const roleIdsByApp = new Map();
+
+  for (const appIdValue of effectiveAppSet) {
+    roleIdsByApp.set(appIdValue, new Set());
+  }
+
+  for (const mapping of activeRoleRows) {
+    if (!effectiveAppSet.has(mapping.app_id)) continue;
+
+    if (!activeRoleSet.has(mapping.role_id)) {
+      continue;
+    }
+
+    if (!roleIdsByApp.has(mapping.app_id)) {
+      roleIdsByApp.set(mapping.app_id, new Set());
+    }
+
+    roleIdsByApp.get(mapping.app_id).add(mapping.role_id);
+  }
+
+  const appIds = Array.from(effectiveAppSet);
+  const appsWithoutModules = appIds.filter((resolvedAppId) => {
+    const roleSet = roleIdsByApp.get(resolvedAppId);
+    return !(roleSet instanceof Set) || roleSet.size === 0;
+  });
+
+  return {
+    appIds,
+    roleIdsByApp,
+    appsWithoutModules,
+  };
 }
 
-async function loadVisibleCardsForApp({ supabaseClient, userId, appId }) {
+async function loadVisibleCardsForApp({ supabaseClient, appId, allowedRoleIds }) {
+  if (!(allowedRoleIds instanceof Set) || allowedRoleIds.size === 0) {
+    return [];
+  }
   const { data: groupRows, error: groupError } = await supabaseClient
     .from(APP_CARD_GROUP_TABLE)
     .select("*")
@@ -258,26 +343,6 @@ async function loadVisibleCardsForApp({ supabaseClient, userId, appId }) {
 
   if (cardRoleError) throw new Error(cardRoleError.message || "Unable to load card role access");
 
-  const { data: userRoleRows, error: userRoleError } = await supabaseClient
-    .from(USER_MASTER_TABLES.userAppRoleAccess)
-    .select("*")
-    .eq(USER_MASTER_COLUMNS.userId, userId)
-    .eq(USER_MASTER_COLUMNS.appId, appId);
-
-  if (userRoleError) throw new Error(userRoleError.message || "Unable to load user roles");
-
-  const userRoleSet = new Set(
-    uniqueTextValues(
-      (userRoleRows || [])
-        .filter((mapping) => isMappingActive(mapping))
-        .map((mapping) => mapping?.[USER_MASTER_COLUMNS.roleId])
-    )
-  );
-
-  if (userRoleSet.size === 0) {
-    return [];
-  }
-
   const activeCardRoleMappings = (cardRoleRows || [])
     .map(normalizeCardRoleAccess)
     .filter((mapping) => mapping.is_active)
@@ -287,7 +352,7 @@ async function loadVisibleCardsForApp({ supabaseClient, userId, appId }) {
 
   const visibleCardIdSet = new Set(
     activeCardRoleMappings
-      .filter((mapping) => userRoleSet.has(asText(mapping.role_id)))
+      .filter((mapping) => allowedRoleIds.has(asText(mapping.role_id)))
       .map((mapping) => mapping.card_id)
   );
   const visibleCards = cards.filter((card) => visibleCardIdSet.has(card.card_id));
@@ -321,29 +386,53 @@ async function buildCardsResponse(request, requireAppId) {
       return toErrorResponse("Unable to resolve user account", 401);
     }
 
-    const appIds = await getActiveUserAppIds({
+    const { appIds, roleIdsByApp, appsWithoutModules } = await getActiveUserAppRoles({
       supabaseClient: auth.supabaseClient,
       userId,
       appId: requestedAppId,
     });
 
     if (appIds.length === 0) {
-      return NextResponse.json(requireAppId ? [] : { success: true, groups: [] });
+      return NextResponse.json(
+        requireAppId
+          ? []
+          : {
+              success: true,
+              groups: [],
+              appIds: [],
+              appsWithoutModules: [],
+              noModulesAssigned: false,
+            }
+      );
     }
 
     const grouped = [];
 
     for (const appId of appIds) {
+      const allowedRoleIds = roleIdsByApp.get(String(appId));
+
       const appGroups = await loadVisibleCardsForApp({
         supabaseClient: auth.supabaseClient,
-        userId,
         appId,
+        allowedRoleIds,
       });
 
       grouped.push(...appGroups);
     }
 
-    return NextResponse.json(requireAppId ? grouped : { success: true, groups: grouped });
+    const noModulesAssigned = grouped.length === 0 && appIds.length > 0;
+
+    return NextResponse.json(
+      requireAppId
+        ? grouped
+        : {
+            success: true,
+            groups: grouped,
+            appIds,
+            appsWithoutModules,
+            noModulesAssigned,
+          }
+    );
   } catch (error) {
     const status = Number(error?.status || 500);
     return toErrorResponse(error?.message || "Unable to load My Apps cards", status);

@@ -307,11 +307,22 @@ export function calculateQuote(project, setup) {
   );
 
   const hangerCost = totalGutter * hangerRate;
-  const shouldApplyLeafGuard = Boolean(
-    project.leafGuardIncluded || hasValue(project.leafGuardId) || hasCustomLeafGuardRate
-  );
+  const hasLeafGuardToggle =
+    project?.leafGuardIncluded === true || project?.leafGuardIncluded === false;
+  const shouldApplyLeafGuard = hasLeafGuardToggle
+    ? Boolean(project.leafGuardIncluded)
+    : Boolean(
+        hasValue(project.leafGuardId) ||
+          hasCustomLeafGuardRate ||
+          (manualLeafGuardRateEnabled && hasManualLeafGuardRate)
+      );
   const leafGuardCost = shouldApplyLeafGuard ? leafGuardUnitPrice : 0;
-  const extrasPrice = project.extrasIncluded
+  const hasExtrasToggle = project?.extrasIncluded === true || project?.extrasIncluded === false;
+  const hasExtraValues = (project.extras || []).some(
+    (item) => hasValue(item?.description) || hasValue(item?.qty) || hasValue(item?.unitPrice)
+  );
+  const shouldApplyExtras = hasExtrasToggle ? Boolean(project.extrasIncluded) : hasExtraValues;
+  const extrasPrice = shouldApplyExtras
     ? sum((project.extras || []).map((item) => asNumber(item.qty) * asNumber(item.unitPrice)))
     : 0;
   const setupDiscountPercent = rates.discountRates[String(project.discountId)] ?? 0;
@@ -327,15 +338,12 @@ export function calculateQuote(project, setup) {
   const manualDiscountPercent = hasManualDiscountPercent
     ? normalizePercentRate(project.manualDiscountPercent)
     : null;
-  const shouldApplyDiscount = hasManualDiscountToggle
-    ? Boolean(
-        project.discountIncluded ||
-          hasValue(project.discountId) ||
-          (manualDiscountRateEnabled && hasManualDiscountPercent)
-      )
+  const hasDiscountToggle =
+    project?.discountIncluded === true || project?.discountIncluded === false;
+  const shouldApplyDiscount = hasDiscountToggle
+    ? Boolean(project.discountIncluded)
     : Boolean(
-        project.discountIncluded ||
-          hasValue(project.discountId) ||
+        hasValue(project.discountId) ||
           hasCustomDiscountPercent ||
           (manualDiscountRateEnabled && hasManualDiscountPercent)
       );
@@ -365,7 +373,11 @@ export function calculateQuote(project, setup) {
     extrasPrice;
 
   const rawDepositPercent = project.depositPercent ?? project.deposit_percent;
-  const depositRate = normalizePercentRate(rawDepositPercent);
+  const hasDepositToggle = project?.depositIncluded === true || project?.depositIncluded === false;
+  const shouldApplyDeposit = hasDepositToggle
+    ? Boolean(project.depositIncluded)
+    : hasValue(rawDepositPercent);
+  const depositRate = shouldApplyDeposit ? normalizePercentRate(rawDepositPercent) : 0;
 
   const {
     projectTotal,

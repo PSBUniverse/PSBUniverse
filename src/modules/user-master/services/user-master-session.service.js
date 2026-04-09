@@ -21,15 +21,23 @@ export async function GET(request) {
         })
       : auth.access;
 
-    return NextResponse.json({
+    const limitedAccess =
+      Boolean(auth.accountInactive) ||
+      Boolean(auth.statusRestricted) ||
+      !Boolean(scopedAccess?.isDevMain || scopedAccess?.hasAccess || scopedAccess?.hasAppAccess);
+
+    const response = NextResponse.json({
       session: auth.session,
       user: auth.safeUser,
       status: auth.statusRecord,
       access: scopedAccess,
       accountInactive: Boolean(auth.accountInactive),
       statusRestricted: Boolean(auth.statusRestricted),
-      limitedAccess: Boolean(auth.limitedAccess),
+      limitedAccess,
     });
+
+    response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    return response;
   } catch (error) {
     return toErrorResponse(error?.message || "Unable to load session", 500);
   }

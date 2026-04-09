@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Badge,
   Button,
@@ -24,7 +25,12 @@ import {
   USER_MASTER_CACHE_KEYS,
   USER_MASTER_CACHE_TTL,
 } from "@/modules/user-master/cache/user-master.cache";
+import {
+  invalidateUserAccessQueries,
+  notifyUserMasterSessionRefresh,
+} from "@/modules/user-master/cache/user-master.query";
 import SetupCardsTab from "@/modules/user-master/components/setup-cards-tab";
+import { useUserAccess } from "@/modules/user-master/hooks/useUserAccess";
 import { toastError, toastInfo, toastSuccess, toastWarning } from "@/shared/utils/toast";
 import { startNavbarLoader } from "@/shared/utils/navbar-loader";
 
@@ -160,13 +166,18 @@ function emptyAccessDraft() {
 
 export default function AdminUserMasterPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState({ text: "", variant: "info" });
   const [accessDeniedMessage, setAccessDeniedMessage] = useState("");
   const [activeTab, setActiveTab] = useState("users");
-
-  const [access, setAccess] = useState(null);
+  const {
+    access,
+    loading: accessLoading,
+    error: accessError,
+    refetch: refetchAccess,
+  } = useUserAccess({ appKey: ADMIN_APP_KEY });
 
   const [references, setReferences] = useState({
     companies: [],
@@ -344,6 +355,44 @@ export default function AdminUserMasterPage() {
     return mappings.filter((mapping) => String(mapping.user_id) === String(selectedUserId));
   }, [mappings, selectedUserId]);
 
+  const roleKeys = useMemo(
+    () =>
+      Array.isArray(access?.roleKeys)
+        ? access.roleKeys.map((value) => String(value || "").toLowerCase())
+        : [],
+    [access?.roleKeys]
+  );
+
+  const isDevMainUser = Boolean(access?.isDevMain) || roleKeys.includes("devmain");
+  const isAdminUser =
+    isDevMainUser ||
+    roleKeys.includes("admin") ||
+    Boolean(access?.hasAppAccess || access?.hasAccess);
+  const canManagePrivilegedSetup = isDevMainUser;
+  const visibleMainTabs = useMemo(
+    () =>
+      canManagePrivilegedSetup
+        ? ["users", "companies", "statuses", "applications", "cards"]
+        : isAdminUser
+          ? ["users", "companies"]
+          : [],
+    [canManagePrivilegedSetup, isAdminUser]
+  );
+
+  useEffect(() => {
+    if (visibleMainTabs.length === 0) return;
+    if (!visibleMainTabs.includes(activeTab)) {
+      setActiveTab("users");
+    }
+  }, [activeTab, visibleMainTabs]);
+
+  useEffect(() => {
+    if (canManagePrivilegedSetup) return;
+    if (userDrawer.activeTab === "access") {
+      setUserDrawer((prev) => ({ ...prev, activeTab: "profile" }));
+    }
+  }, [canManagePrivilegedSetup, userDrawer.activeTab]);
+
   const setError = useCallback((text) => {
     setFeedback({ text, variant: "danger" });
   }, []);
@@ -351,6 +400,11 @@ export default function AdminUserMasterPage() {
   const setInfo = useCallback((text, variant = "info") => {
     setFeedback({ text, variant });
   }, []);
+
+  const invalidateAccessCache = useCallback(async () => {
+    await invalidateUserAccessQueries(queryClient);
+    notifyUserMasterSessionRefresh();
+  }, [queryClient]);
 
   useEffect(() => {
     if (!feedback?.text) return;
@@ -374,7 +428,7 @@ export default function AdminUserMasterPage() {
   }, [feedback]);
 
   useEffect(() => {
-    if (!userDrawer.show || !selectedUserId || !access?.isDevMain) {
+    if (!userDrawer.show || !selectedUserId || !canManagePrivilegedSetup) {
       setDevmainPasswordInfo({ loading: false, hash: "" });
       return;
     }
@@ -410,7 +464,7 @@ export default function AdminUserMasterPage() {
     return () => {
       cancelled = true;
     };
-  }, [access?.isDevMain, selectedUserId, userDrawer.show]);
+  }, [canManagePrivilegedSetup, selectedUserId, userDrawer.show]);
 
   const loadData = useCallback(
     async (options = {}) => {
@@ -420,14 +474,35 @@ export default function AdminUserMasterPage() {
       setFeedback((prev) => ({ ...prev, text: "" }));
 
       try {
-        const [sessionPayload, bootstrapPayload, usersPayload, mappingsPayload, statusesPayload] = await Promise.all([
-          getCachedJson({
-            key: USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
-            url: `/api/user-master/session?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-            ttlMs: USER_MASTER_CACHE_TTL.accessMs,
-            forceFresh,
-            allowStaleOnError: false,
-          }),
+        const sessionAccess = access || null;
+        const sessionRoleKeys = Array.isArray(sessionAccess?.roleKeys)
+          ? sessionAccess.roleKeys.map((value) => String(value || "").toLowerCase())
+          : [];
+        const sessionIsDevMain =
+          Boolean(sessionAccess?.isDevMain) || sessionRoleKeys.includes("devmain");
+        const hasScopedReadPermission =
+          sessionIsDevMain ||
+          sessionRoleKeys.includes("admin") ||
+          Boolean(
+            sessionAccess?.hasAppAccess ||
+              sessionAccess?.hasAccess ||
+              sessionAccess?.permissions?.read
+          );
+
+        if (!hasScopedReadPermission) {
+          setReferences({
+            companies: [],
+            departments: [],
+            statuses: [],
+            roles: [],
+            applications: [],
+          });
+          setUsers([]);
+          setMappings([]);
+          return;
+        }
+
+        const [bootstrapPayload, usersPayload] = await Promise.all([
           getCachedJson({
             key: USER_MASTER_CACHE_KEYS.bootstrap,
             url: "/api/user-master/bootstrap",
@@ -442,30 +517,37 @@ export default function AdminUserMasterPage() {
             forceFresh,
             allowStaleOnError: true,
           }),
-          getCachedJson({
-            key: USER_MASTER_CACHE_KEYS.mappings,
-            url: `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-            ttlMs: USER_MASTER_CACHE_TTL.listsMs,
-            forceFresh,
-            allowStaleOnError: true,
-          }),
-          getCachedJson({
-            key: `${USER_MASTER_CACHE_KEYS.bootstrap}:statuses:admin`,
-            url: `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-            ttlMs: USER_MASTER_CACHE_TTL.listsMs,
-            forceFresh,
-            allowStaleOnError: true,
-          }),
         ]);
 
-        setAccess(sessionPayload.access || null);
+        let mappingsPayload = null;
+        let statusesPayload = null;
+
+        if (sessionIsDevMain) {
+          [mappingsPayload, statusesPayload] = await Promise.all([
+            getCachedJson({
+              key: USER_MASTER_CACHE_KEYS.mappings,
+              url: `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+              ttlMs: USER_MASTER_CACHE_TTL.listsMs,
+              forceFresh,
+              allowStaleOnError: true,
+            }),
+            getCachedJson({
+              key: `${USER_MASTER_CACHE_KEYS.bootstrap}:statuses:admin`,
+              url: `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+              ttlMs: USER_MASTER_CACHE_TTL.listsMs,
+              forceFresh,
+              allowStaleOnError: true,
+            }),
+          ]);
+        }
 
         setReferences({
           companies: bootstrapPayload.companies || [],
           departments: bootstrapPayload.departments || [],
           statuses:
-            statusesPayload?.statuses ||
-            statusesPayload?.data?.statuses ||
+            (sessionIsDevMain
+              ? statusesPayload?.statuses || statusesPayload?.data?.statuses
+              : null) ||
             bootstrapPayload.statuses ||
             [],
           roles: bootstrapPayload.roles || [],
@@ -475,7 +557,7 @@ export default function AdminUserMasterPage() {
         cacheReferenceData(bootstrapPayload);
 
         setUsers(usersPayload.users || []);
-        setMappings(mappingsPayload.mappings || []);
+        setMappings(sessionIsDevMain ? mappingsPayload?.mappings || [] : []);
       } catch (error) {
         const statusCode = Number(error?.status || error?.payload?.status || 0);
         const message = error?.message || "Unable to load configuration data";
@@ -489,14 +571,34 @@ export default function AdminUserMasterPage() {
         setLoading(false);
       }
     },
-    [setError]
+    [access, setError]
   );
 
   useEffect(() => {
+    if (accessLoading) {
+      return;
+    }
+
+    if (accessError) {
+      const statusCode = Number(accessError?.status || accessError?.payload?.status || 0);
+      if (statusCode === 401 || statusCode === 403) {
+        setAccessDeniedMessage(accessError?.message || "Access denied");
+      } else {
+        setError(accessError?.message || "Unable to load access");
+      }
+      setLoading(false);
+      return;
+    }
+
     void loadData();
-  }, [loadData]);
+  }, [accessError, accessLoading, loadData, setError]);
 
   useEffect(() => {
+    if (!canManagePrivilegedSetup) {
+      setSelectedApplicationId("");
+      return;
+    }
+
     const applications = references.applications || [];
     if (applications.length === 0) {
       setSelectedApplicationId("");
@@ -510,10 +612,15 @@ export default function AdminUserMasterPage() {
     if (!hasValue(selectedApplicationId) || !exists) {
       setSelectedApplicationId(asSelectValue(applications[0]?.app_id));
     }
-  }, [references.applications, selectedApplicationId]);
+  }, [canManagePrivilegedSetup, references.applications, selectedApplicationId]);
 
   const loadRolesForApplication = useCallback(
     async (appId, options = {}) => {
+      if (!canManagePrivilegedSetup) {
+        setApplicationRoles([]);
+        return;
+      }
+
       if (!hasValue(appId)) {
         setApplicationRoles([]);
         return;
@@ -545,17 +652,22 @@ export default function AdminUserMasterPage() {
         setLoadingApplicationRoles(false);
       }
     },
-    [setError]
+    [canManagePrivilegedSetup, setError]
   );
 
   useEffect(() => {
-    if (!hasValue(selectedApplicationId)) {
+    if (!canManagePrivilegedSetup || !hasValue(selectedApplicationId)) {
       setApplicationRoles([]);
       return;
     }
 
     void loadRolesForApplication(selectedApplicationId);
-  }, [loadRolesForApplication, selectedApplicationId]);
+  }, [canManagePrivilegedSetup, loadRolesForApplication, selectedApplicationId]);
+
+  const handleRefresh = useCallback(async () => {
+    await refetchAccess();
+    await loadData({ forceFresh: true });
+  }, [loadData, refetchAccess]);
 
   async function callApi(url, method, body) {
     const response = await fetch(url, {
@@ -777,6 +889,7 @@ export default function AdminUserMasterPage() {
     try {
       await callApi("/api/auth/logout", "POST");
       clearSessionCache(ADMIN_APP_KEY);
+      await invalidateAccessCache();
       startNavbarLoader();
       router.push("/login");
     } catch (error) {
@@ -787,6 +900,11 @@ export default function AdminUserMasterPage() {
   }
 
   async function handleEmulateUser(userIdOverride = null) {
+    if (!canManagePrivilegedSetup) {
+      setError("Only DEVMAN can emulate users.");
+      return;
+    }
+
     const targetUserId = userIdOverride ?? selectedUserId;
 
     if (!targetUserId) {
@@ -804,6 +922,7 @@ export default function AdminUserMasterPage() {
       });
 
       clearSessionCache(ADMIN_APP_KEY);
+      await invalidateAccessCache();
       startNavbarLoader();
       setInfo(payloadResponse?.message || "Now emulating user.", "success");
       router.push("/dashboard");
@@ -1239,6 +1358,7 @@ export default function AdminUserMasterPage() {
 
       closeRoleModal();
       invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
+      await invalidateAccessCache();
       await loadRolesForApplication(roleAppId, { forceFresh: true });
     } catch (error) {
       setError(error?.message || "Unable to save role");
@@ -1274,6 +1394,7 @@ export default function AdminUserMasterPage() {
       }
 
       invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
+      await invalidateAccessCache();
       setInfo(payloadResponse?.message || "Role deactivated.", "success");
       if (hasValue(selectedApplicationId)) {
         await loadRolesForApplication(selectedApplicationId, { forceFresh: true });
@@ -1312,6 +1433,7 @@ export default function AdminUserMasterPage() {
       }
 
       invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
+      await invalidateAccessCache();
       setInfo(payloadResponse?.message || "Role activated.", "success");
       if (hasValue(selectedApplicationId)) {
         await loadRolesForApplication(selectedApplicationId, { forceFresh: true });
@@ -2041,6 +2163,7 @@ export default function AdminUserMasterPage() {
         USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
         USER_MASTER_CACHE_KEYS.profile,
       ]);
+      await invalidateAccessCache();
     } catch (error) {
       setError(error?.message || "Unable to save access mapping");
     } finally {
@@ -2078,6 +2201,7 @@ export default function AdminUserMasterPage() {
         USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
         USER_MASTER_CACHE_KEYS.profile,
       ]);
+      await invalidateAccessCache();
       setInfo(payloadResponse?.message || "Access mapping deactivated.", "success");
     } catch (error) {
       setError(error?.message || "Unable to deactivate access mapping");
@@ -2116,6 +2240,7 @@ export default function AdminUserMasterPage() {
         USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
         USER_MASTER_CACHE_KEYS.profile,
       ]);
+      await invalidateAccessCache();
       setInfo(payloadResponse?.message || "Access mapping activated.", "success");
     } catch (error) {
       setError(error?.message || "Unable to activate access mapping");
@@ -2178,6 +2303,7 @@ export default function AdminUserMasterPage() {
           roles: (previous.roles || []).filter((item) => String(item.role_id) !== String(id)),
         }));
         invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
+        await invalidateAccessCache();
         if (hasValue(selectedApplicationId)) {
           await loadRolesForApplication(selectedApplicationId, { forceFresh: true });
         }
@@ -2246,6 +2372,7 @@ export default function AdminUserMasterPage() {
           USER_MASTER_CACHE_KEYS.access(ADMIN_APP_KEY),
           USER_MASTER_CACHE_KEYS.profile,
         ]);
+        await invalidateAccessCache();
         setInfo(payloadResponse?.message || "Access mapping removed.", "success");
       }
 
@@ -2289,7 +2416,7 @@ export default function AdminUserMasterPage() {
     );
   }
 
-  if (access && !access.permissions?.read && !access.isDevMain) {
+  if (access && !isAdminUser && !access.permissions?.read) {
     return (
       <Container className="py-4" style={{ maxWidth: 980 }}>
         <div className="notice-banner notice-banner-danger">
@@ -2314,7 +2441,7 @@ export default function AdminUserMasterPage() {
           <Button
             type="button"
             variant="outline-secondary"
-            onClick={() => loadData({ forceFresh: true })}
+            onClick={() => void handleRefresh()}
             disabled={busy}
           >
             Refresh
@@ -2392,55 +2519,59 @@ export default function AdminUserMasterPage() {
                               >
                                 <i className="bi bi-pencil-square" aria-hidden="true" />
                               </Button>
-                              {userIsActive ? (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline-danger"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    deactivateUser(user.user_id);
-                                  }}
-                                  disabled={busy}
-                                  aria-label="Deactivate user"
-                                  title="Deactivate"
-                                >
-                                  <i className="bi bi-slash-circle" aria-hidden="true" />
-                                </Button>
-                              ) : (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline-success"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    activateUser(user.user_id);
-                                  }}
-                                  disabled={busy}
-                                  aria-label="Activate user"
-                                  title="Activate"
-                                >
-                                  <i className="bi bi-check-circle" aria-hidden="true" />
-                                </Button>
-                              )}
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline-dark"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openRemoveModal(
-                                    "users",
-                                    user.user_id,
-                                    user.username || user.email || `User ${user.user_id}`
-                                  );
-                                }}
-                                disabled={busy}
-                                aria-label="Remove user"
-                                title="Remove"
-                              >
-                                <i className="bi bi-trash" aria-hidden="true" />
-                              </Button>
+                              {canManagePrivilegedSetup ? (
+                                <>
+                                  {userIsActive ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline-danger"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        deactivateUser(user.user_id);
+                                      }}
+                                      disabled={busy}
+                                      aria-label="Deactivate user"
+                                      title="Deactivate"
+                                    >
+                                      <i className="bi bi-slash-circle" aria-hidden="true" />
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline-success"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        activateUser(user.user_id);
+                                      }}
+                                      disabled={busy}
+                                      aria-label="Activate user"
+                                      title="Activate"
+                                    >
+                                      <i className="bi bi-check-circle" aria-hidden="true" />
+                                    </Button>
+                                  )}
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline-dark"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openRemoveModal(
+                                        "users",
+                                        user.user_id,
+                                        user.username || user.email || `User ${user.user_id}`
+                                      );
+                                    }}
+                                    disabled={busy}
+                                    aria-label="Remove user"
+                                    title="Remove"
+                                  >
+                                    <i className="bi bi-trash" aria-hidden="true" />
+                                  </Button>
+                                </>
+                              ) : null}
                             </div>
                           </td>
                           <td>{user.username || "--"}</td>
@@ -2513,55 +2644,59 @@ export default function AdminUserMasterPage() {
                               >
                                 <i className="bi bi-pencil-square" aria-hidden="true" />
                               </Button>
-                              {company.is_active ? (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline-danger"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    deactivateCompany(company.comp_id);
-                                  }}
-                                  disabled={busy}
-                                  aria-label="Deactivate company"
-                                  title="Deactivate"
-                                >
-                                  <i className="bi bi-slash-circle" aria-hidden="true" />
-                                </Button>
-                              ) : (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline-success"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    activateCompany(company.comp_id);
-                                  }}
-                                  disabled={busy}
-                                  aria-label="Activate company"
-                                  title="Activate"
-                                >
-                                  <i className="bi bi-check-circle" aria-hidden="true" />
-                                </Button>
-                              )}
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline-dark"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openRemoveModal(
-                                    "companies",
-                                    company.comp_id,
-                                    company.comp_name || `Company ${company.comp_id}`
-                                  );
-                                }}
-                                disabled={busy}
-                                aria-label="Remove company"
-                                title="Remove"
-                              >
-                                <i className="bi bi-trash" aria-hidden="true" />
-                              </Button>
+                              {canManagePrivilegedSetup ? (
+                                <>
+                                  {company.is_active ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline-danger"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        deactivateCompany(company.comp_id);
+                                      }}
+                                      disabled={busy}
+                                      aria-label="Deactivate company"
+                                      title="Deactivate"
+                                    >
+                                      <i className="bi bi-slash-circle" aria-hidden="true" />
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline-success"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        activateCompany(company.comp_id);
+                                      }}
+                                      disabled={busy}
+                                      aria-label="Activate company"
+                                      title="Activate"
+                                    >
+                                      <i className="bi bi-check-circle" aria-hidden="true" />
+                                    </Button>
+                                  )}
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline-dark"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openRemoveModal(
+                                        "companies",
+                                        company.comp_id,
+                                        company.comp_name || `Company ${company.comp_id}`
+                                      );
+                                    }}
+                                    disabled={busy}
+                                    aria-label="Remove company"
+                                    title="Remove"
+                                  >
+                                    <i className="bi bi-trash" aria-hidden="true" />
+                                  </Button>
+                                </>
+                              ) : null}
                             </div>
                           </td>
                           <td>{company.comp_id}</td>
@@ -2581,13 +2716,15 @@ export default function AdminUserMasterPage() {
                             <td colSpan={7} className="bg-light-subtle">
                               <div className="d-flex align-items-center justify-content-between mb-2">
                                 <strong>Departments</strong>
-                                <Button
-                                  size="sm"
-                                  onClick={() => openCreateDepartmentModal(company.comp_id)}
-                                  disabled={busy}
-                                >
-                                  Add Department
-                                </Button>
+                                {canManagePrivilegedSetup ? (
+                                  <Button
+                                    size="sm"
+                                    onClick={() => openCreateDepartmentModal(company.comp_id)}
+                                    disabled={busy}
+                                  >
+                                    Add Department
+                                  </Button>
+                                ) : null}
                               </div>
 
                               {companyDepartments.length === 0 ? (
@@ -2599,7 +2736,7 @@ export default function AdminUserMasterPage() {
                                       <th>Department Name</th>
                                       <th>Short Name</th>
                                       <th>Active</th>
-                                      <th>Actions</th>
+                                      {canManagePrivilegedSetup ? <th>Actions</th> : null}
                                     </tr>
                                   </thead>
                                   <tbody>
@@ -2612,59 +2749,61 @@ export default function AdminUserMasterPage() {
                                             {department.is_active ? "Active" : "Inactive"}
                                           </Badge>
                                         </td>
-                                        <td>
-                                          <div className="d-flex gap-1">
-                                            <Button
-                                              size="sm"
-                                              variant="outline-primary"
-                                              onClick={() => openEditDepartmentModal(department)}
-                                              disabled={busy}
-                                              aria-label="Edit department"
-                                              title="Edit"
-                                            >
-                                              <i className="bi bi-pencil-square" aria-hidden="true" />
-                                            </Button>
-                                            {department.is_active ? (
+                                        {canManagePrivilegedSetup ? (
+                                          <td>
+                                            <div className="d-flex gap-1">
                                               <Button
                                                 size="sm"
-                                                variant="outline-danger"
-                                                onClick={() => deactivateDepartment(department.dept_id)}
+                                                variant="outline-primary"
+                                                onClick={() => openEditDepartmentModal(department)}
                                                 disabled={busy}
-                                                aria-label="Deactivate department"
-                                                title="Deactivate"
+                                                aria-label="Edit department"
+                                                title="Edit"
                                               >
-                                                <i className="bi bi-slash-circle" aria-hidden="true" />
+                                                <i className="bi bi-pencil-square" aria-hidden="true" />
                                               </Button>
-                                            ) : (
+                                              {department.is_active ? (
+                                                <Button
+                                                  size="sm"
+                                                  variant="outline-danger"
+                                                  onClick={() => deactivateDepartment(department.dept_id)}
+                                                  disabled={busy}
+                                                  aria-label="Deactivate department"
+                                                  title="Deactivate"
+                                                >
+                                                  <i className="bi bi-slash-circle" aria-hidden="true" />
+                                                </Button>
+                                              ) : (
+                                                <Button
+                                                  size="sm"
+                                                  variant="outline-success"
+                                                  onClick={() => activateDepartment(department.dept_id)}
+                                                  disabled={busy}
+                                                  aria-label="Activate department"
+                                                  title="Activate"
+                                                >
+                                                  <i className="bi bi-check-circle" aria-hidden="true" />
+                                                </Button>
+                                              )}
                                               <Button
                                                 size="sm"
-                                                variant="outline-success"
-                                                onClick={() => activateDepartment(department.dept_id)}
+                                                variant="outline-dark"
+                                                onClick={() =>
+                                                  openRemoveModal(
+                                                    "departments",
+                                                    department.dept_id,
+                                                    department.dept_name || `Department ${department.dept_id}`
+                                                  )
+                                                }
                                                 disabled={busy}
-                                                aria-label="Activate department"
-                                                title="Activate"
+                                                aria-label="Remove department"
+                                                title="Remove"
                                               >
-                                                <i className="bi bi-check-circle" aria-hidden="true" />
+                                                <i className="bi bi-trash" aria-hidden="true" />
                                               </Button>
-                                            )}
-                                            <Button
-                                              size="sm"
-                                              variant="outline-dark"
-                                              onClick={() =>
-                                                openRemoveModal(
-                                                  "departments",
-                                                  department.dept_id,
-                                                  department.dept_name || `Department ${department.dept_id}`
-                                                )
-                                              }
-                                              disabled={busy}
-                                              aria-label="Remove department"
-                                              title="Remove"
-                                            >
-                                              <i className="bi bi-trash" aria-hidden="true" />
-                                            </Button>
-                                          </div>
-                                        </td>
+                                            </div>
+                                          </td>
+                                        ) : null}
                                       </tr>
                                     ))}
                                   </tbody>
@@ -2682,7 +2821,8 @@ export default function AdminUserMasterPage() {
           </Card>
         </Tab>
 
-        <Tab eventKey="statuses" title="Setup • Statuses">
+        {canManagePrivilegedSetup ? (
+          <Tab eventKey="statuses" title="Setup • Statuses">
           <Card>
             <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
               <span>Statuses</span>
@@ -2775,9 +2915,11 @@ export default function AdminUserMasterPage() {
               </Table>
             </Card.Body>
           </Card>
-        </Tab>
+          </Tab>
+        ) : null}
 
-        <Tab eventKey="applications" title="Setup • Applications">
+        {canManagePrivilegedSetup ? (
+          <Tab eventKey="applications" title="Setup • Applications">
           <Row className="g-3">
             <Col lg={6}>
               <Card>
@@ -3002,14 +3144,17 @@ export default function AdminUserMasterPage() {
               </Card>
             </Col>
           </Row>
-        </Tab>
+            </Tab>
+        ) : null}
 
-        <Tab eventKey="cards" title="Setup • Cards">
-          <SetupCardsTab
-            applications={references.applications}
-            roles={references.roles}
-          />
-        </Tab>
+        {canManagePrivilegedSetup ? (
+          <Tab eventKey="cards" title="Setup • Cards">
+              <SetupCardsTab
+                applications={references.applications}
+                roles={references.roles}
+              />
+            </Tab>
+        ) : null}
 
       </Tabs>
 
@@ -3485,7 +3630,8 @@ export default function AdminUserMasterPage() {
                 </Row>
               </Tab>
 
-              <Tab eventKey="access" title="Access">
+              {canManagePrivilegedSetup ? (
+                <Tab eventKey="access" title="Access">
                 <div className="d-flex justify-content-end mb-2">
                   <Button
                     type="button"
@@ -3584,7 +3730,8 @@ export default function AdminUserMasterPage() {
                     </tbody>
                   </Table>
                 )}
-              </Tab>
+                </Tab>
+              ) : null}
 
               <Tab eventKey="account" title="Account">
                 <div className="notice-banner notice-banner-muted mb-3">
@@ -3667,7 +3814,7 @@ export default function AdminUserMasterPage() {
                   </Row>
                 ) : null}
 
-                {access?.isDevMain ? (
+                {canManagePrivilegedSetup ? (
                   <div className="mt-3">
                     <Form.Group>
                       <Form.Label className="mb-1">Stored Password Hash (read-only)</Form.Label>
@@ -3703,7 +3850,7 @@ export default function AdminUserMasterPage() {
                   </div>
                 ) : null}
 
-                {access?.isDevMain ? (
+                {canManagePrivilegedSetup ? (
                   <div className="mt-3 d-flex justify-content-between align-items-center">
                     <div className="small text-muted">
                       Last Login: {userModal.draft.last_login ? formatDateTime(userModal.draft.last_login) : "--"}

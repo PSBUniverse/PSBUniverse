@@ -1,59 +1,48 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  invalidateUserAccessQueries,
+  notifyUserMasterSessionRefresh,
+} from "@/modules/user-master/cache/user-master.query";
+import { useUserAccess } from "@/modules/user-master/hooks/useUserAccess";
 
 export function useUserMaster() {
-  const [loading, setLoading] = useState(true);
-  const [session, setSession] = useState(null);
-  const [user, setUser] = useState(null);
-  const [access, setAccess] = useState(null);
-  const [accountInactive, setAccountInactive] = useState(false);
-  const [statusRestricted, setStatusRestricted] = useState(false);
-  const [limitedAccess, setLimitedAccess] = useState(false);
+  const queryClient = useQueryClient();
+  const {
+    loading,
+    refreshing,
+    error,
+    session,
+    user,
+    access,
+    accountInactive,
+    statusRestricted,
+    limitedAccess,
+    isAuthenticated,
+    refetch,
+  } = useUserAccess();
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const response = await fetch("/api/user-master/session", {
-        method: "GET",
-        cache: "no-store",
-      });
+  const refresh = useCallback(async (options = {}) => {
+    const silent = Boolean(options?.silent);
 
-      if (!response.ok) {
-        setSession(null);
-        setUser(null);
-        setAccess(null);
-        setAccountInactive(false);
-        setStatusRestricted(false);
-        setLimitedAccess(false);
-        return;
-      }
-
-      const payload = await response.json();
-      setSession(payload?.session || null);
-      setUser(payload?.user || null);
-      setAccess(payload?.access || null);
-      setAccountInactive(Boolean(payload?.accountInactive));
-      setStatusRestricted(Boolean(payload?.statusRestricted));
-      setLimitedAccess(Boolean(payload?.limitedAccess));
-    } catch {
-      setSession(null);
-      setUser(null);
-      setAccess(null);
-      setAccountInactive(false);
-      setStatusRestricted(false);
-      setLimitedAccess(false);
-    } finally {
-      setLoading(false);
+    if (silent) {
+      await invalidateUserAccessQueries(queryClient);
+      return;
     }
-  }, []);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    await refetch();
+  }, [queryClient, refetch]);
+
+  const triggerSessionRefresh = useCallback(() => {
+    notifyUserMasterSessionRefresh();
+  }, []);
 
   return {
     loading,
+    refreshing,
+    error,
     session,
     user,
     access,
@@ -61,6 +50,7 @@ export function useUserMaster() {
     statusRestricted,
     limitedAccess,
     refresh,
-    isAuthenticated: Boolean(session?.userId),
+    triggerSessionRefresh,
+    isAuthenticated,
   };
 }

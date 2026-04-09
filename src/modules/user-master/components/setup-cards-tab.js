@@ -3,8 +3,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge, Button, Card, Form, Modal, Spinner, Tab, Table, Tabs } from "react-bootstrap";
 import { toastError, toastSuccess } from "@/shared/utils/toast";
+import {
+  createCacheKey,
+  getOrFetchCached,
+  invalidateCacheByPrefix,
+} from "@/core/cache/adapters/browser-cache.adapter";
 
 const ADMIN_APP_KEY = "admin-config";
+const SETUP_CARDS_CACHE_NAMESPACE = "user-master";
+const SETUP_CARDS_CACHE_TTL_MS = 2 * 60 * 1000;
+const SETUP_CARDS_CACHE_PREFIX = createCacheKey("setup-cards", ADMIN_APP_KEY);
+
+function buildSetupCardsCacheKey(appId) {
+  return createCacheKey(SETUP_CARDS_CACHE_PREFIX, appId);
+}
 
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
@@ -113,32 +125,44 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
     return payload;
   }
 
-  const loadGroups = useCallback(async (appId) => {
+  const loadGroups = useCallback(async (appId, options = {}) => {
     if (!hasValue(appId)) {
       setGroups([]);
       setExpandedGroups({});
       return;
     }
 
+    const forceFresh = Boolean(options.forceFresh);
+
     setLoading(true);
     setErrorMessage("");
 
     try {
-      const response = await fetch(
-        `/api/setup/cards?app_id=${encodeURIComponent(appId)}&appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        {
-          method: "GET",
-          cache: "no-store",
-        }
-      );
+      const cacheResult = await getOrFetchCached({
+        key: buildSetupCardsCacheKey(appId),
+        namespace: SETUP_CARDS_CACHE_NAMESPACE,
+        ttlMs: SETUP_CARDS_CACHE_TTL_MS,
+        forceFresh,
+        allowStaleOnError: true,
+        fetcher: async () => {
+          const response = await fetch(
+            `/api/setup/cards?app_id=${encodeURIComponent(appId)}&appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+            {
+              method: "GET",
+              cache: "no-store",
+            }
+          );
 
-      const payload = await response.json().catch(() => []);
+          const payload = await response.json().catch(() => []);
+          if (!response.ok) {
+            throw new Error(payload?.message || "Unable to load card setup.");
+          }
 
-      if (!response.ok) {
-        throw new Error(payload?.message || "Unable to load card setup.");
-      }
+          return Array.isArray(payload) ? payload : [];
+        },
+      });
 
-      const nextGroups = Array.isArray(payload) ? payload : [];
+      const nextGroups = Array.isArray(cacheResult?.data) ? cacheResult.data : [];
       setGroups(nextGroups);
 
       if (nextGroups.length > 0) {
@@ -154,6 +178,19 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const invalidateSetupCardsCache = useCallback((appId = null) => {
+    if (hasValue(appId)) {
+      invalidateCacheByPrefix(buildSetupCardsCacheKey(appId), {
+        namespace: SETUP_CARDS_CACHE_NAMESPACE,
+      });
+      return;
+    }
+
+    invalidateCacheByPrefix(SETUP_CARDS_CACHE_PREFIX, {
+      namespace: SETUP_CARDS_CACHE_NAMESPACE,
+    });
   }, []);
 
   useEffect(() => {
@@ -232,7 +269,8 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         });
 
         closeGroupModal();
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
         toastSuccess(
           groupModal.mode === "create" ? "Group added." : "Group updated.",
           "Setup Cards"
@@ -243,7 +281,14 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         setSaving(false);
       }
     },
-    [closeGroupModal, groupModal.draft, groupModal.mode, loadGroups, selectedAppId]
+    [
+      closeGroupModal,
+      groupModal.draft,
+      groupModal.mode,
+      invalidateSetupCardsCache,
+      loadGroups,
+      selectedAppId,
+    ]
   );
 
   const toggleGroupActive = useCallback(
@@ -258,14 +303,15 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           is_active: Boolean(nextValue),
         });
 
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
       } catch (error) {
         toastError(error?.message || "Unable to update group active state.", "Setup Cards");
       } finally {
         setSaving(false);
       }
     },
-    [loadGroups, selectedAppId]
+    [invalidateSetupCardsCache, loadGroups, selectedAppId]
   );
 
   const updateGroupOrder = useCallback(
@@ -283,14 +329,15 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           display_order: parsed,
         });
 
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
       } catch (error) {
         toastError(error?.message || "Unable to update group order.", "Setup Cards");
       } finally {
         setSaving(false);
       }
     },
-    [loadGroups, selectedAppId]
+    [invalidateSetupCardsCache, loadGroups, selectedAppId]
   );
 
   const removeGroup = useCallback(
@@ -308,7 +355,8 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           "DELETE"
         );
 
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
         toastSuccess("Group deleted.", "Setup Cards");
       } catch (error) {
         toastError(error?.message || "Unable to delete group.", "Setup Cards");
@@ -316,7 +364,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         setSaving(false);
       }
     },
-    [loadGroups, selectedAppId]
+    [invalidateSetupCardsCache, loadGroups, selectedAppId]
   );
 
   const openCreateCard = useCallback((group) => {
@@ -407,7 +455,8 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         });
 
         closeCardModal();
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
         toastSuccess(
           cardModal.mode === "create" ? "Card added." : "Card updated.",
           "Setup Cards"
@@ -418,7 +467,14 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         setSaving(false);
       }
     },
-    [cardModal.draft, cardModal.mode, closeCardModal, loadGroups, selectedAppId]
+    [
+      cardModal.draft,
+      cardModal.mode,
+      closeCardModal,
+      invalidateSetupCardsCache,
+      loadGroups,
+      selectedAppId,
+    ]
   );
 
   const toggleCardActive = useCallback(
@@ -433,14 +489,15 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           is_active: Boolean(nextValue),
         });
 
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
       } catch (error) {
         toastError(error?.message || "Unable to update card active state.", "Setup Cards");
       } finally {
         setSaving(false);
       }
     },
-    [loadGroups, selectedAppId]
+    [invalidateSetupCardsCache, loadGroups, selectedAppId]
   );
 
   const updateCardOrder = useCallback(
@@ -458,14 +515,15 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           display_order: parsed,
         });
 
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
       } catch (error) {
         toastError(error?.message || "Unable to update card order.", "Setup Cards");
       } finally {
         setSaving(false);
       }
     },
-    [loadGroups, selectedAppId]
+    [invalidateSetupCardsCache, loadGroups, selectedAppId]
   );
 
   const removeCard = useCallback(
@@ -483,7 +541,8 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           "DELETE"
         );
 
-        await loadGroups(selectedAppId);
+        invalidateSetupCardsCache(selectedAppId);
+        await loadGroups(selectedAppId, { forceFresh: true });
         toastSuccess("Card deleted.", "Setup Cards");
       } catch (error) {
         toastError(error?.message || "Unable to delete card.", "Setup Cards");
@@ -491,7 +550,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         setSaving(false);
       }
     },
-    [loadGroups, selectedAppId]
+    [invalidateSetupCardsCache, loadGroups, selectedAppId]
   );
 
   if (appOptions.length === 0) {
@@ -528,7 +587,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
                     type="button"
                     size="sm"
                     variant="outline-secondary"
-                    onClick={() => void loadGroups(selectedAppId)}
+                    onClick={() => void loadGroups(selectedAppId, { forceFresh: true })}
                     disabled={loading || saving}
                   >
                     Refresh

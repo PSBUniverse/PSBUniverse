@@ -6,8 +6,25 @@ import { useRouter } from "next/navigation";
 import { Button } from "react-bootstrap";
 import Form from "react-bootstrap/Form";
 
+const DALLAS_TIME_ZONE = "America/Chicago";
+
+function getDallasHour() {
+  try {
+    const hourText = new Intl.DateTimeFormat("en-US", {
+      hour: "2-digit",
+      hour12: false,
+      timeZone: DALLAS_TIME_ZONE,
+    }).format(new Date());
+
+    const hour = Number(hourText);
+    return Number.isFinite(hour) ? hour : new Date().getHours();
+  } catch {
+    return new Date().getHours();
+  }
+}
+
 function getTimeGreeting() {
-  const hour = new Date().getHours();
+  const hour = getDallasHour();
 
   if (hour < 12) return "Good morning";
   if (hour < 18) return "Good afternoon";

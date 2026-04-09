@@ -1,8 +1,10 @@
 ﻿import { NextResponse } from "next/server";
 import {
+  updateUserAccount,
   USER_MASTER_COLUMNS,
   USER_MASTER_TABLES,
 } from "@/modules/user-master/access/user-master.access";
+import { hashPassword } from "@/core/security/password.security";
 import {
   getAuthenticatedContext,
   sanitizeUserRecord,
@@ -12,6 +14,9 @@ import {
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
 }
+
+const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_NUMBER_OR_SYMBOL_REGEX = /[^A-Za-z]/;
 
 function isInactiveFlag(value) {
   if (value === false || value === 0) return true;
@@ -203,10 +208,34 @@ export async function PATCH(request) {
   try {
     const auth = await getAuthenticatedContext();
     if (auth.error) return auth.error;
-    return toErrorResponse(
-      "Profile and password changes are available only in Configuration & Settings. Please email your administrator.",
-      403
-    );
+    const body = await request.json().catch(() => ({}));
+    const nextPassword = String(body?.password || "");
+
+    if (!nextPassword.trim()) {
+      return toErrorResponse("Password is required", 400);
+    }
+
+    if (nextPassword.length < MIN_PASSWORD_LENGTH) {
+      return toErrorResponse("Password must be at least 8 characters", 400);
+    }
+
+    if (!PASSWORD_NUMBER_OR_SYMBOL_REGEX.test(nextPassword)) {
+      return toErrorResponse("Password must include at least one number or symbol", 400);
+    }
+
+    await updateUserAccount({
+      userId: auth.userRecord[USER_MASTER_COLUMNS.userId],
+      updates: {
+        password_hash: await hashPassword(nextPassword),
+      },
+      actorUserId: auth.userRecord[USER_MASTER_COLUMNS.userId],
+      supabaseClient: auth.supabaseClient,
+    });
+
+    return NextResponse.json({
+      success: true,
+      message: "Password updated",
+    });
   } catch (error) {
     return toErrorResponse(error?.message || "Unable to process profile request", 500);
   }

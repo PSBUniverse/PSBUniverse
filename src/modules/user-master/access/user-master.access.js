@@ -432,17 +432,17 @@ export async function resolveUserRoleAccess(config = {}) {
   const normalizedAppKey = normalizeText(appKey);
   const normalizedAppKeyToken = normalizeKeyToken(appKey);
 
-  const { data: mappings, error: mappingsError } = await supabaseClient
+  const { data: roleMappingsRaw, error: roleMappingsError } = await supabaseClient
     .from(tables.userAppRoleAccess)
     .select("*")
     .eq(columns.userId, userId);
 
-  if (mappingsError) throw mappingsError;
+  if (roleMappingsError) throw roleMappingsError;
 
-  const allMappingsRaw = mappings || [];
-  const activeMappings = allMappingsRaw.filter((mapping) => isRowActive(mapping));
-  const mappedRoleIds = uniqueValues(activeMappings.map((row) => row[columns.roleId]));
-  const mappedAppIds = uniqueValues(activeMappings.map((row) => row[columns.appId]));
+  const allRoleMappingsRaw = roleMappingsRaw || [];
+  const activeRoleMappings = allRoleMappingsRaw.filter((mapping) => isRowActive(mapping));
+  const mappedRoleIds = uniqueValues(activeRoleMappings.map((row) => row[columns.roleId]));
+  const roleMappedAppIds = uniqueValues(activeRoleMappings.map((row) => row[columns.appId]));
 
   const roleRecords = await fetchRolesByIds({
     supabaseClient,
@@ -455,7 +455,7 @@ export async function resolveUserRoleAccess(config = {}) {
     supabaseClient,
     tableName: tables.applications,
     appIdColumn: columns.appId,
-    appIds: mappedAppIds,
+    appIds: roleMappedAppIds,
   });
 
   const activeRoleRecords = roleRecords.filter((roleRecord) => isRowActive(roleRecord));
@@ -469,13 +469,21 @@ export async function resolveUserRoleAccess(config = {}) {
       .map((roleRecord) => String(roleRecord[columns.roleId]))
   );
 
-  const allMappings = activeMappings.filter((mapping) => {
+  const allRoleMappings = activeRoleMappings.filter((mapping) => {
     const roleIdValue = String(mapping[columns.roleId]);
     const appIdValue = String(mapping[columns.appId]);
     return roleById.has(roleIdValue) && appById.has(appIdValue);
   });
 
-  const isDevMain = allMappings.some((mapping) => devmainRoleIds.has(String(mapping[columns.roleId])));
+  const effectiveAppAccessIds = new Set(
+    uniqueValues(allRoleMappings.map((mapping) => mapping?.[columns.appId])).map((appIdValue) =>
+      String(appIdValue)
+    )
+  );
+
+  const isDevMain = allRoleMappings.some((mapping) =>
+    devmainRoleIds.has(String(mapping[columns.roleId]))
+  );
 
   let resolvedAppId = hasValue(appId) ? String(appId) : null;
 
@@ -492,12 +500,31 @@ export async function resolveUserRoleAccess(config = {}) {
 
   const hasAppScope = hasValue(appId) || Boolean(normalizedAppKey);
 
-  const relevantMappings = allMappings.filter((mapping) => {
+  const relevantMappings = allRoleMappings.filter((mapping) => {
     if (!resolvedAppId) return !normalizedAppKey;
     return String(mapping[columns.appId]) === resolvedAppId;
   });
 
-  const hasAccess = hasAppScope ? relevantMappings.length > 0 : isDevMain || relevantMappings.length > 0;
+  const hasModuleAccess = relevantMappings.length > 0;
+
+  const hasAppAccess = (() => {
+    if (isDevMain) return true;
+
+    if (hasAppScope) {
+      if (!resolvedAppId) return false;
+      return effectiveAppAccessIds.has(String(resolvedAppId));
+    }
+
+    return effectiveAppAccessIds.size > 0;
+  })();
+
+  const hasAccess = Boolean(isDevMain || hasAppAccess);
+
+  const accessibleAppIdsForContext = hasAppScope
+    ? resolvedAppId && hasAppAccess
+      ? [String(resolvedAppId)]
+      : []
+    : Array.from(effectiveAppAccessIds);
 
   const roleKeysForContext = uniqueValues(
     relevantMappings
@@ -507,15 +534,15 @@ export async function resolveUserRoleAccess(config = {}) {
   );
 
   const appKeysForContext = uniqueValues(
-    relevantMappings
-      .map((mapping) => appById.get(String(mapping[columns.appId])))
+    accessibleAppIdsForContext
+      .map((appIdValue) => appById.get(String(appIdValue)))
       .filter(Boolean)
       .map((appRecord) => getAppKey(appRecord, appFieldCandidates))
   );
 
   const appKeyTokensForContext = uniqueValues(
-    relevantMappings
-      .map((mapping) => appById.get(String(mapping[columns.appId])))
+    accessibleAppIdsForContext
+      .map((appIdValue) => appById.get(String(appIdValue)))
       .filter(Boolean)
       .flatMap((appRecord) => collectNormalizedKeys(appRecord, appFieldCandidates))
   );
@@ -530,7 +557,7 @@ export async function resolveUserRoleAccess(config = {}) {
       read: hasAccess,
     };
 
-    if (defaultCrudForMappedRole && hasAccess) {
+    if (defaultCrudForMappedRole && hasModuleAccess) {
       permissions = fullPermissions();
     }
 
@@ -546,12 +573,16 @@ export async function resolveUserRoleAccess(config = {}) {
     isDevMain,
     bypassStandardChecks: isDevMain,
     hasAccess,
+    hasAppAccess,
+    hasModuleAccess,
+    noModulesAssigned: Boolean(hasAppScope && hasAppAccess && !hasModuleAccess && !isDevMain),
     permissions,
     roleKeys: roleKeysForContext,
     appKeys: appKeysForContext,
     appKeyTokens: appKeyTokensForContext,
-    mappingCount: allMappingsRaw.length,
-    activeMappingCount: allMappings.length,
+    mappingCount: allRoleMappingsRaw.length,
+    activeMappingCount: allRoleMappings.length,
+    appAccessMappingCount: 0,
     mappings: relevantMappings,
   };
 }
@@ -591,7 +622,7 @@ export async function assertUserCanPerformAction(config = {}) {
   });
 
   if (!result.hasAccess) {
-    throw new Error("Access denied: user has no role mapping for this application context");
+    throw new Error("Access denied: user has no application access for this context");
   }
 
   if (!result.permissions[normalizedAction]) {

@@ -28,7 +28,6 @@ export async function GET(request) {
       action: "read",
       appKey: getAdminAppKey(request),
       rolePermissionMap: ADMIN_ROLE_PERMISSION_MAP,
-      requiredRoleKey: "devmain",
     });
 
     if (gate.error) return gate.error;
@@ -60,7 +59,6 @@ export async function POST(request) {
       action: "create",
       appKey: getAdminAppKey(request),
       rolePermissionMap: ADMIN_ROLE_PERMISSION_MAP,
-      requiredRoleKey: "devmain",
     });
 
     if (gate.error) return gate.error;
@@ -94,7 +92,6 @@ export async function PATCH(request) {
       action: "update",
       appKey: getAdminAppKey(request),
       rolePermissionMap: ADMIN_ROLE_PERMISSION_MAP,
-      requiredRoleKey: "devmain",
     });
 
     if (gate.error) return gate.error;

@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { Container, Spinner } from "react-bootstrap";
 import Header from "@/shared/components/layout/Header";
 import { useUserMaster } from "@/modules/user-master/hooks/useUserMaster";
+import { useUserAccess } from "@/modules/user-master/hooks/useUserAccess";
+import { clearUserAccessQueries } from "@/modules/user-master/cache/user-master.query";
 import {
   NAVBAR_LOADER_FINISH_EVENT,
   NAVBAR_LOADER_START_EVENT,
@@ -86,33 +89,41 @@ function getRequiredAppKeyForPathname(pathname) {
 export default function AppLayout({ children }) {
   const pathname = usePathname();
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressVisible, setProgressVisible] = useState(false);
-  const [routeAccessLoading, setRouteAccessLoading] = useState(false);
-  const [routeAccessAllowed, setRouteAccessAllowed] = useState(true);
   const { loading, user, access, isAuthenticated } = useUserMaster();
+  const requiredAppKey = getRequiredAppKeyForPathname(pathname);
 
-  const hasLocalAccessForApp = useCallback(
-    (appKey) => {
-      if (!appKey) return true;
-      if (access?.isDevMain) return true;
+  const {
+    access: scopedAccess,
+    accountInactive: scopedAccountInactive,
+    statusRestricted: scopedStatusRestricted,
+    loading: scopedAccessLoading,
+  } = useUserAccess({
+    appKey: requiredAppKey,
+    enabled: Boolean(requiredAppKey && isAuthenticated),
+  });
 
-      const normalizedAppKey = String(appKey || "").trim().toLowerCase();
-      const normalizedToken = normalizedAppKey.replace(/[^a-z0-9]/g, "");
+  const routeAccessLoading = Boolean(requiredAppKey && scopedAccessLoading);
 
-      const directKeys = Array.isArray(access?.appKeys)
-        ? access.appKeys.map((value) => String(value || "").trim().toLowerCase())
-        : [];
+  const routeAccessAllowed = useMemo(() => {
+    if (!requiredAppKey) {
+      return true;
+    }
 
-      const tokenKeys = Array.isArray(access?.appKeyTokens)
-        ? access.appKeyTokens.map((value) => String(value || "").trim().toLowerCase())
-        : [];
+    if (scopedAccountInactive || scopedStatusRestricted) {
+      return false;
+    }
 
-      return directKeys.includes(normalizedAppKey) || tokenKeys.includes(normalizedToken);
-    },
-    [access]
-  );
+    return Boolean(
+      scopedAccess?.isDevMain ||
+        scopedAccess?.hasAppAccess ||
+        scopedAccess?.hasAccess ||
+        scopedAccess?.permissions?.read
+    );
+  }, [requiredAppKey, scopedAccess, scopedAccountInactive, scopedStatusRestricted]);
 
   const routeSignature = useMemo(() => pathname, [pathname]);
 
@@ -250,79 +261,23 @@ export default function AppLayout({ children }) {
   }, [isAuthenticated, loading, router, startLoader]);
 
   useEffect(() => {
-    if (loading || !isAuthenticated) {
+    if (loading || !isAuthenticated || !requiredAppKey || routeAccessLoading) {
       return;
     }
 
-    const scopedAppKey = getRequiredAppKeyForPathname(pathname);
-    if (!scopedAppKey) {
-      setRouteAccessAllowed(true);
-      setRouteAccessLoading(false);
-      return;
+    if (!routeAccessAllowed) {
+      startLoader();
+      router.replace("/dashboard");
     }
-
-    if (hasLocalAccessForApp(scopedAppKey)) {
-      setRouteAccessAllowed(true);
-      setRouteAccessLoading(false);
-      return;
-    }
-
-    let isCancelled = false;
-
-    setRouteAccessAllowed(true);
-    setRouteAccessLoading(true);
-    startLoader();
-
-    const verifyRouteAccess = async () => {
-      try {
-        const response = await fetch(
-          `/api/user-master/session?appKey=${encodeURIComponent(scopedAppKey)}`,
-          {
-            method: "GET",
-            cache: "no-store",
-          }
-        );
-
-        const payload = await response.json().catch(() => null);
-        const allowed =
-          response.ok &&
-          !payload?.accountInactive &&
-          !payload?.statusRestricted &&
-          Boolean(
-            payload?.access?.isDevMain ||
-              payload?.access?.hasAccess ||
-              payload?.access?.permissions?.read
-          );
-
-        if (isCancelled) {
-          return;
-        }
-
-        if (allowed) {
-          setRouteAccessAllowed(true);
-        } else {
-          setRouteAccessAllowed(false);
-          router.replace("/dashboard");
-        }
-      } catch {
-        if (!isCancelled) {
-          setRouteAccessAllowed(false);
-          router.replace("/dashboard");
-        }
-      } finally {
-        if (!isCancelled) {
-          setRouteAccessLoading(false);
-        }
-        finishLoader();
-      }
-    };
-
-    void verifyRouteAccess();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [finishLoader, hasLocalAccessForApp, isAuthenticated, loading, pathname, router, startLoader]);
+  }, [
+    isAuthenticated,
+    loading,
+    requiredAppKey,
+    routeAccessAllowed,
+    routeAccessLoading,
+    router,
+    startLoader,
+  ]);
 
   useEffect(() => {
     if (!hasMountedRouteRef.current) {
@@ -404,15 +359,14 @@ export default function AppLayout({ children }) {
     try {
       await fetch("/api/auth/logout", { method: "POST" });
     } finally {
+      clearUserAccessQueries(queryClient);
       setLogoutBusy(false);
       startLoader();
       router.replace("/login");
     }
   }
 
-  const requiredAppKey = getRequiredAppKeyForPathname(pathname);
-
-  if (loading || (requiredAppKey && !routeAccessAllowed)) {
+  if (loading || (requiredAppKey && (routeAccessLoading || !routeAccessAllowed))) {
     return (
       <main className="auth-loading">
         <Spinner animation="border" role="status" />
@@ -427,13 +381,21 @@ export default function AppLayout({ children }) {
   const roleKeys = Array.isArray(access?.roleKeys)
     ? access.roleKeys.map((value) => String(value || "").toLowerCase())
     : [];
+  const appKeys = Array.isArray(access?.appKeys)
+    ? access.appKeys.map((value) => String(value || "").toLowerCase())
+    : [];
+  const appKeyTokens = Array.isArray(access?.appKeyTokens)
+    ? access.appKeyTokens.map((value) => String(value || "").toLowerCase())
+    : [];
+  const hasAdminConfigApp = appKeys.includes("admin-config") || appKeyTokens.includes("adminconfig");
   const normalizedUserRole = String(user?.role || user?.role_name || "").toLowerCase();
   const showConfiguration =
     Boolean(access?.isDevMain) ||
     roleKeys.includes("devmain") ||
     roleKeys.includes("admin") ||
     normalizedUserRole === "devmain" ||
-    normalizedUserRole === "admin";
+    normalizedUserRole === "admin" ||
+    hasAdminConfigApp;
 
   return (
     <div className="app-shell">

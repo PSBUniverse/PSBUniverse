@@ -7,9 +7,13 @@ import {
   Card,
   Col,
   Container,
+  Form,
+  Modal,
   Row,
+  Spinner,
 } from "react-bootstrap";
 import { toastError, toastInfo, toastSuccess } from "@/shared/utils/toast";
+import { useUserAccess } from "@/modules/user-master/hooks/useUserAccess";
 import {
   cacheReferenceData,
   cacheSessionData,
@@ -27,6 +31,8 @@ const INACTIVE_STATUS_HINTS = [
   "blocked",
   "archived",
 ];
+const MIN_PASSWORD_LENGTH = 8;
+const PASSWORD_NUMBER_OR_SYMBOL_REGEX = /[^A-Za-z]/;
 
 function hasText(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
@@ -124,7 +130,13 @@ function normalizeProfilePayload(payload) {
 
 export default function UserProfilePage() {
   const [loading, setLoading] = useState(true);
-  const [access, setAccess] = useState(null);
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [passwordSubmitting, setPasswordSubmitting] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
   const [relations, setRelations] = useState({
     company: null,
     department: null,
@@ -149,19 +161,14 @@ export default function UserProfilePage() {
     status_id: "",
   });
 
+  const { access, user: sessionUser, session: activeSession } = useUserAccess();
+
   const loadProfile = useCallback(async (options = {}) => {
     const forceFresh = Boolean(options.forceFresh);
     setLoading(true);
 
     try {
-      const [sessionPayload, profilePayloadRaw, bootstrapPayload] = await Promise.all([
-        getCachedJson({
-          key: USER_MASTER_CACHE_KEYS.session,
-          url: "/api/user-master/session",
-          ttlMs: USER_MASTER_CACHE_TTL.sessionMs,
-          forceFresh,
-          allowStaleOnError: false,
-        }),
+      const [profilePayloadRaw, bootstrapPayload] = await Promise.all([
         getCachedJson({
           key: USER_MASTER_CACHE_KEYS.profile,
           url: "/api/user-master/profile",
@@ -202,10 +209,10 @@ export default function UserProfilePage() {
         : [];
 
       const sessionSuggestsMappedRoles = Boolean(
-        sessionPayload?.access?.isDevMain ||
-          (Array.isArray(sessionPayload?.access?.roleKeys) && sessionPayload.access.roleKeys.length > 0) ||
-          Number(sessionPayload?.access?.activeMappingCount || 0) > 0 ||
-          Number(sessionPayload?.access?.mappingCount || 0) > 0
+        access?.isDevMain ||
+          (Array.isArray(access?.roleKeys) && access.roleKeys.length > 0) ||
+          Number(access?.activeMappingCount || 0) > 0 ||
+          Number(access?.mappingCount || 0) > 0
       );
 
       if (!forceFresh && cachedRoleGroups.length === 0 && sessionSuggestsMappedRoles) {
@@ -224,17 +231,15 @@ export default function UserProfilePage() {
         }
       }
 
-      const resolvedUser = profilePayload.user || sessionPayload.user || null;
+      const resolvedUser = profilePayload.user || sessionUser || null;
 
       cacheSessionData({
-        session: sessionPayload.session,
+        session: activeSession,
         user: resolvedUser,
-        access: sessionPayload.access,
+        access,
       });
 
       cacheReferenceData(bootstrapPayload);
-
-      setAccess(sessionPayload.access || null);
       setRelations({
         company: profilePayload.relations?.company || null,
         department: profilePayload.relations?.department || null,
@@ -267,7 +272,7 @@ export default function UserProfilePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [access, activeSession, sessionUser]);
 
   useEffect(() => {
     void loadProfile();
@@ -407,6 +412,89 @@ export default function UserProfilePage() {
     }
   }, []);
 
+  const resetPasswordModal = useCallback(() => {
+    setNewPassword("");
+    setConfirmPassword("");
+    setShowNewPassword(false);
+    setShowConfirmPassword(false);
+    setPasswordError("");
+    setPasswordSubmitting(false);
+  }, []);
+
+  const openPasswordModal = useCallback(() => {
+    resetPasswordModal();
+    setShowPasswordModal(true);
+  }, [resetPasswordModal]);
+
+  const closePasswordModal = useCallback(() => {
+    if (passwordSubmitting) return;
+    setShowPasswordModal(false);
+    resetPasswordModal();
+  }, [passwordSubmitting, resetPasswordModal]);
+
+  const submitPasswordUpdate = useCallback(
+    async (event) => {
+      event.preventDefault();
+      if (passwordSubmitting) return;
+
+      const nextPassword = String(newPassword || "");
+      const nextConfirm = String(confirmPassword || "");
+
+      if (!nextPassword.trim() || !nextConfirm.trim()) {
+        setPasswordError("Password is required");
+        return;
+      }
+
+      if (nextPassword.length < MIN_PASSWORD_LENGTH) {
+        setPasswordError("Password must be at least 8 characters");
+        return;
+      }
+
+      if (!PASSWORD_NUMBER_OR_SYMBOL_REGEX.test(nextPassword)) {
+        setPasswordError("Password must include at least one number or symbol");
+        return;
+      }
+
+      if (nextPassword !== nextConfirm) {
+        setPasswordError("Passwords do not match");
+        return;
+      }
+
+      setPasswordError("");
+      setPasswordSubmitting(true);
+
+      try {
+        const response = await fetch("/api/user-master/profile", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            password: nextPassword,
+          }),
+        });
+
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok || payload?.success === false) {
+          setPasswordError(
+            payload?.message || payload?.error || "Unable to update password right now"
+          );
+          return;
+        }
+
+        toastSuccess("Password updated successfully", "User Profile");
+        setShowPasswordModal(false);
+        resetPasswordModal();
+      } catch (error) {
+        setPasswordError(error?.message || "Unable to update password right now");
+      } finally {
+        setPasswordSubmitting(false);
+      }
+    },
+    [confirmPassword, newPassword, passwordSubmitting, resetPasswordModal]
+  );
+
   const renderValue = useCallback(
     (value, options = {}) => {
       const text = String(value || "").trim();
@@ -452,8 +540,8 @@ export default function UserProfilePage() {
       </div>
 
       <div className="profile-readonly-alert notice-banner notice-banner-info mb-3">
-        Profile and password updates are managed by administrators.
-        Please email your administrator to request any changes.
+        Profile field updates are managed by administrators.
+        You can update your password below.
       </div>
 
       {access && !access.hasAccess ? (
@@ -605,22 +693,140 @@ export default function UserProfilePage() {
             <Card.Body>
               <h5 className="mb-2">Need to update something?</h5>
               <p className="text-muted mb-2">
-                Profile fields and password changes are restricted to administrators only.
+                Profile field changes are handled by administrators.
               </p>
               {requestUpdateHref ? (
-                <div className="d-flex align-items-center gap-2 flex-wrap">
-                  <a href={requestUpdateHref} className="btn btn-sm btn-primary">
-                    Request Update
-                  </a>
-                  <p className="mb-0">Send your request by email and include your username plus exact changes needed.</p>
-                </div>
+                <>
+                  <div className="d-flex align-items-center gap-2 flex-wrap mb-2">
+                    <a href={requestUpdateHref} className="btn btn-sm btn-primary">
+                      Request Update
+                    </a>
+                    <Button
+                      type="button"
+                      variant="outline-secondary"
+                      size="sm"
+                      onClick={openPasswordModal}
+                    >
+                      Update Password
+                    </Button>
+                  </div>
+                  <p className="mb-0">
+                    Send your profile update request by email and include your username plus exact
+                    changes needed.
+                  </p>
+                </>
               ) : (
-                <p className="mb-0">Contact your administrator to request profile updates.</p>
+                <>
+                  <div className="d-flex align-items-center gap-2 flex-wrap mb-2">
+                    <Button
+                      type="button"
+                      variant="outline-secondary"
+                      size="sm"
+                      onClick={openPasswordModal}
+                    >
+                      Update Password
+                    </Button>
+                  </div>
+                  <p className="mb-0">Contact your administrator to request profile field updates.</p>
+                </>
               )}
             </Card.Body>
           </Card>
         </Col>
       </Row>
+
+      <Modal
+        show={showPasswordModal}
+        onHide={closePasswordModal}
+        centered
+        backdrop={passwordSubmitting ? "static" : true}
+        keyboard={!passwordSubmitting}
+      >
+        <Form onSubmit={submitPasswordUpdate}>
+          <Modal.Header closeButton={!passwordSubmitting}>
+            <Modal.Title>Update Password</Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <Form.Group className="mb-3" controlId="profile-update-password-new">
+              <Form.Label>New Password</Form.Label>
+              <div className="d-flex align-items-center gap-2">
+                <Form.Control
+                  type={showNewPassword ? "text" : "password"}
+                  placeholder="Enter new password"
+                  value={newPassword}
+                  onChange={(event) => {
+                    setNewPassword(event.target.value);
+                    if (passwordError) setPasswordError("");
+                  }}
+                  autoComplete="new-password"
+                  required
+                  disabled={passwordSubmitting}
+                />
+                <Button
+                  type="button"
+                  variant="outline-secondary"
+                  onClick={() => setShowNewPassword((previous) => !previous)}
+                  disabled={passwordSubmitting}
+                >
+                  {showNewPassword ? "Hide" : "Show"}
+                </Button>
+              </div>
+            </Form.Group>
+
+            <Form.Group className="mb-0" controlId="profile-update-password-confirm">
+              <Form.Label>Confirm Password</Form.Label>
+              <div className="d-flex align-items-center gap-2">
+                <Form.Control
+                  type={showConfirmPassword ? "text" : "password"}
+                  placeholder="Retype new password"
+                  value={confirmPassword}
+                  onChange={(event) => {
+                    setConfirmPassword(event.target.value);
+                    if (passwordError) setPasswordError("");
+                  }}
+                  autoComplete="new-password"
+                  required
+                  disabled={passwordSubmitting}
+                />
+                <Button
+                  type="button"
+                  variant="outline-secondary"
+                  onClick={() => setShowConfirmPassword((previous) => !previous)}
+                  disabled={passwordSubmitting}
+                >
+                  {showConfirmPassword ? "Hide" : "Show"}
+                </Button>
+              </div>
+            </Form.Group>
+
+            {passwordError ? (
+              <div className="text-danger small mt-3" role="alert">
+                {passwordError}
+              </div>
+            ) : null}
+          </Modal.Body>
+          <Modal.Footer>
+            <Button
+              type="button"
+              variant="outline-secondary"
+              onClick={closePasswordModal}
+              disabled={passwordSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={passwordSubmitting}>
+              {passwordSubmitting ? (
+                <>
+                  <Spinner size="sm" animation="border" className="me-2" />
+                  Updating...
+                </>
+              ) : (
+                "Confirm Update"
+              )}
+            </Button>
+          </Modal.Footer>
+        </Form>
+      </Modal>
     </Container>
   );
 }
