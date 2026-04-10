@@ -29,12 +29,25 @@ import {
   invalidateUserAccessQueries,
   notifyUserMasterSessionRefresh,
 } from "@/modules/user-master/cache/user-master.query";
-import SetupCardsTab from "@/modules/user-master/components/setup-cards-tab";
 import { useUserAccess } from "@/modules/user-master/hooks/useUserAccess";
 import { toastError, toastInfo, toastSuccess, toastWarning } from "@/shared/utils/toast";
 import { startNavbarLoader } from "@/shared/utils/navbar-loader";
 
 const ADMIN_APP_KEY = "admin-config";
+const ADMIN_MAIN_TABS = ["users", "companies", "statuses", "applications"];
+const TEMP_ID_PREFIX = "tmp-";
+
+const DEFAULT_DIFF_ENTRY = {
+  isNew: false,
+  isChanged: false,
+  isPendingRemove: false,
+  changedColumns: new Set(),
+};
+
+function normalizeMainTabKey(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ADMIN_MAIN_TABS.includes(normalized) ? normalized : "";
+}
 
 function getLabel(record, preferred = []) {
   const fields = [
@@ -73,6 +86,100 @@ function toNullableNumber(value) {
   if (value === "" || value === undefined || value === null) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isTempId(value) {
+  return String(value || "").startsWith(TEMP_ID_PREFIX);
+}
+
+function createTempId(entityKey) {
+  return `${TEMP_ID_PREFIX}${String(entityKey || "row")}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function cloneBatchRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...(row || {}),
+    __pendingRemove: false,
+  }));
+}
+
+function normalizeBatchValue(value, type = "text") {
+  if (type === "number") {
+    if (!hasValue(value)) return "";
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? String(parsed) : "";
+  }
+
+  if (type === "boolean") {
+    return value === false || value === 0 || value === "0" ? "0" : "1";
+  }
+
+  return String(value ?? "").trim();
+}
+
+function buildBatchDiff(draftRows, baselineRows, idKey, fields) {
+  const baselineMap = new Map(
+    (Array.isArray(baselineRows) ? baselineRows : [])
+      .filter((row) => hasValue(row?.[idKey]))
+      .map((row) => [String(row[idKey]), row])
+  );
+
+  const byId = new Map();
+  let newRows = 0;
+  let modifiedRows = 0;
+  let removedRows = 0;
+
+  (Array.isArray(draftRows) ? draftRows : []).forEach((row) => {
+    const rowId = String(row?.[idKey] ?? "");
+    const baselineRow = baselineMap.get(rowId);
+    const isNew = isTempId(rowId) || !baselineRow;
+    const isPendingRemove = Boolean(row?.__pendingRemove);
+    const changedColumns = new Set();
+
+    if (!isNew && baselineRow) {
+      (fields || []).forEach((field) => {
+        const key = typeof field === "string" ? field : field?.key;
+        const type = typeof field === "string" ? "text" : field?.type || "text";
+        if (!key) return;
+
+        const draftValue = normalizeBatchValue(row?.[key], type);
+        const baselineValue = normalizeBatchValue(baselineRow?.[key], type);
+
+        if (draftValue !== baselineValue) {
+          changedColumns.add(key);
+        }
+      });
+    }
+
+    const isChanged = isNew || changedColumns.size > 0;
+
+    if (isPendingRemove) {
+      if (!isNew) {
+        removedRows += 1;
+      }
+    } else if (isNew) {
+      newRows += 1;
+    } else if (changedColumns.size > 0) {
+      modifiedRows += 1;
+    }
+
+    byId.set(rowId, {
+      isNew,
+      isChanged,
+      isPendingRemove,
+      changedColumns,
+    });
+  });
+
+  return {
+    byId,
+    newRows,
+    modifiedRows,
+    removedRows,
+    hasPendingChanges: newRows > 0 || modifiedRows > 0 || removedRows > 0,
+  };
 }
 
 function formatDateTime(value) {
@@ -164,14 +271,16 @@ function emptyAccessDraft() {
   };
 }
 
-export default function AdminUserMasterPage() {
+export default function AdminUserMasterPage({ forcedTab = null }) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const normalizedForcedTab = normalizeMainTabKey(forcedTab);
+  const isSingleSectionMode = hasValue(normalizedForcedTab);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState({ text: "", variant: "info" });
   const [accessDeniedMessage, setAccessDeniedMessage] = useState("");
-  const [activeTab, setActiveTab] = useState("users");
+  const [activeTab, setActiveTab] = useState(() => normalizedForcedTab || "users");
   const {
     access,
     loading: accessLoading,
@@ -189,6 +298,12 @@ export default function AdminUserMasterPage() {
 
   const [users, setUsers] = useState([]);
   const [mappings, setMappings] = useState([]);
+  const [batchBaseline, setBatchBaseline] = useState({
+    users: [],
+    companies: [],
+    statuses: [],
+    applications: [],
+  });
   const [selectedApplicationId, setSelectedApplicationId] = useState("");
   const [applicationRoles, setApplicationRoles] = useState([]);
   const [loadingApplicationRoles, setLoadingApplicationRoles] = useState(false);
@@ -355,6 +470,69 @@ export default function AdminUserMasterPage() {
     return mappings.filter((mapping) => String(mapping.user_id) === String(selectedUserId));
   }, [mappings, selectedUserId]);
 
+  const usersDiff = useMemo(
+    () =>
+      buildBatchDiff(users, batchBaseline.users, "user_id", [
+        "username",
+        "email",
+        "first_name",
+        "middle_name",
+        "last_name",
+        "phone",
+        "address",
+        "position",
+        "hire_date",
+        { key: "comp_id", type: "number" },
+        { key: "dept_id", type: "number" },
+        { key: "status_id", type: "number" },
+      ]),
+    [batchBaseline.users, users]
+  );
+
+  const companiesDiff = useMemo(
+    () =>
+      buildBatchDiff(references.companies, batchBaseline.companies, "comp_id", [
+        "comp_name",
+        "short_name",
+        "comp_email",
+        "comp_phone",
+        { key: "is_active", type: "boolean" },
+      ]),
+    [batchBaseline.companies, references.companies]
+  );
+
+  const statusesDiff = useMemo(
+    () =>
+      buildBatchDiff(references.statuses, batchBaseline.statuses, "status_id", [
+        "sts_name",
+        "sts_desc",
+        { key: "is_active", type: "boolean" },
+      ]),
+    [batchBaseline.statuses, references.statuses]
+  );
+
+  const applicationsDiff = useMemo(
+    () =>
+      buildBatchDiff(references.applications, batchBaseline.applications, "app_id", [
+        "app_name",
+        "app_desc",
+        { key: "is_active", type: "boolean" },
+      ]),
+    [batchBaseline.applications, references.applications]
+  );
+
+  const hasAnyPendingBatchChanges =
+    usersDiff.hasPendingChanges ||
+    companiesDiff.hasPendingChanges ||
+    statusesDiff.hasPendingChanges ||
+    applicationsDiff.hasPendingChanges;
+
+  const selectedApplicationIsPendingRemove = useMemo(() => {
+    if (!hasValue(selectedApplicationId)) return false;
+    const rowDiff = applicationsDiff.byId.get(String(selectedApplicationId || ""));
+    return Boolean(rowDiff?.isPendingRemove);
+  }, [applicationsDiff, selectedApplicationId]);
+
   const roleKeys = useMemo(
     () =>
       Array.isArray(access?.roleKeys)
@@ -372,7 +550,7 @@ export default function AdminUserMasterPage() {
   const visibleMainTabs = useMemo(
     () =>
       canManagePrivilegedSetup
-        ? ["users", "companies", "statuses", "applications", "cards"]
+        ? ["users", "companies", "statuses", "applications"]
         : isAdminUser
           ? ["users", "companies"]
           : [],
@@ -381,10 +559,22 @@ export default function AdminUserMasterPage() {
 
   useEffect(() => {
     if (visibleMainTabs.length === 0) return;
+
+    if (isSingleSectionMode) {
+      const preferredTab = visibleMainTabs.includes(normalizedForcedTab)
+        ? normalizedForcedTab
+        : visibleMainTabs[0];
+
+      if (activeTab !== preferredTab) {
+        setActiveTab(preferredTab);
+      }
+      return;
+    }
+
     if (!visibleMainTabs.includes(activeTab)) {
       setActiveTab("users");
     }
-  }, [activeTab, visibleMainTabs]);
+  }, [activeTab, isSingleSectionMode, normalizedForcedTab, visibleMainTabs]);
 
   useEffect(() => {
     if (canManagePrivilegedSetup) return;
@@ -541,7 +731,7 @@ export default function AdminUserMasterPage() {
           ]);
         }
 
-        setReferences({
+        const nextReferences = {
           companies: bootstrapPayload.companies || [],
           departments: bootstrapPayload.departments || [],
           statuses:
@@ -552,12 +742,22 @@ export default function AdminUserMasterPage() {
             [],
           roles: bootstrapPayload.roles || [],
           applications: bootstrapPayload.applications || [],
-        });
+        };
+
+        const nextUsers = usersPayload.users || [];
+
+        setReferences(nextReferences);
 
         cacheReferenceData(bootstrapPayload);
 
-        setUsers(usersPayload.users || []);
+        setUsers(nextUsers);
         setMappings(sessionIsDevMain ? mappingsPayload?.mappings || [] : []);
+        setBatchBaseline({
+          users: cloneBatchRows(nextUsers),
+          companies: cloneBatchRows(nextReferences.companies),
+          statuses: cloneBatchRows(nextReferences.statuses),
+          applications: cloneBatchRows(nextReferences.applications),
+        });
       } catch (error) {
         const statusCode = Number(error?.status || error?.payload?.status || 0);
         const message = error?.message || "Unable to load configuration data";
@@ -661,13 +861,30 @@ export default function AdminUserMasterPage() {
       return;
     }
 
+    if (isTempId(selectedApplicationId) || selectedApplicationIsPendingRemove) {
+      setApplicationRoles([]);
+      return;
+    }
+
     void loadRolesForApplication(selectedApplicationId);
-  }, [canManagePrivilegedSetup, loadRolesForApplication, selectedApplicationId]);
+  }, [
+    canManagePrivilegedSetup,
+    loadRolesForApplication,
+    selectedApplicationId,
+    selectedApplicationIsPendingRemove,
+  ]);
 
   const handleRefresh = useCallback(async () => {
+    if (
+      hasAnyPendingBatchChanges &&
+      !window.confirm("Discard staged changes and refresh from server?")
+    ) {
+      return;
+    }
+
     await refetchAccess();
     await loadData({ forceFresh: true });
-  }, [loadData, refetchAccess]);
+  }, [hasAnyPendingBatchChanges, loadData, refetchAccess]);
 
   async function callApi(url, method, body) {
     const response = await fetch(url, {
@@ -690,6 +907,413 @@ export default function AdminUserMasterPage() {
 
     return payload;
   }
+
+  const cancelUsersBatch = useCallback(() => {
+    if (!usersDiff.hasPendingChanges) return;
+
+    setUsers(cloneBatchRows(batchBaseline.users));
+    setSelectedUserId(null);
+    closeUserDrawer();
+    closeUserModal();
+    setInfo("Staged user changes discarded.", "success");
+  }, [batchBaseline.users, usersDiff.hasPendingChanges, setInfo]);
+
+  const cancelCompaniesBatch = useCallback(() => {
+    if (!companiesDiff.hasPendingChanges) return;
+
+    setReferences((previous) => ({
+      ...previous,
+      companies: cloneBatchRows(batchBaseline.companies),
+    }));
+    closeCompanyModal();
+    setInfo("Staged company changes discarded.", "success");
+  }, [batchBaseline.companies, companiesDiff.hasPendingChanges, setInfo]);
+
+  const cancelStatusesBatch = useCallback(() => {
+    if (!statusesDiff.hasPendingChanges) return;
+
+    setReferences((previous) => ({
+      ...previous,
+      statuses: cloneBatchRows(batchBaseline.statuses),
+    }));
+    closeStatusModal();
+    setInfo("Staged status changes discarded.", "success");
+  }, [batchBaseline.statuses, setInfo, statusesDiff.hasPendingChanges]);
+
+  const cancelApplicationsBatch = useCallback(() => {
+    if (!applicationsDiff.hasPendingChanges) return;
+
+    setReferences((previous) => ({
+      ...previous,
+      applications: cloneBatchRows(batchBaseline.applications),
+    }));
+
+    if (isTempId(selectedApplicationId)) {
+      setSelectedApplicationId("");
+    }
+
+    closeApplicationModal();
+    setInfo("Staged application changes discarded.", "success");
+  }, [
+    applicationsDiff.hasPendingChanges,
+    batchBaseline.applications,
+    selectedApplicationId,
+    setInfo,
+  ]);
+
+  const saveUsersBatch = useCallback(async () => {
+    if (!usersDiff.hasPendingChanges) return;
+
+    setBusy(true);
+    setFeedback({ text: "", variant: "info" });
+
+    try {
+      const baselineById = new Map(
+        (batchBaseline.users || []).map((row) => [String(row?.user_id), row])
+      );
+
+      for (const row of users || []) {
+        const rowId = String(row?.user_id || "");
+        if (!row?.__pendingRemove || !baselineById.has(rowId)) {
+          continue;
+        }
+
+        await callApi(
+          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&user_id=${encodeURIComponent(row.user_id)}&hard=true`,
+          "DELETE"
+        );
+      }
+
+      for (const row of users || []) {
+        if (row?.__pendingRemove) continue;
+
+        const rowId = String(row?.user_id || "");
+        const baselineRow = baselineById.get(rowId);
+        const isNew = isTempId(rowId) || !baselineRow;
+        const rowDiff = usersDiff.byId.get(rowId) || DEFAULT_DIFF_ENTRY;
+
+        const payload = {
+          username: String(row?.username || "").trim() || null,
+          email: String(row?.email || "").trim() || null,
+          first_name: String(row?.first_name || "").trim() || null,
+          middle_name: String(row?.middle_name || "").trim() || null,
+          last_name: String(row?.last_name || "").trim() || null,
+          phone: String(row?.phone || "").trim() || null,
+          address: String(row?.address || "").trim() || null,
+          position: String(row?.position || "").trim() || null,
+          hire_date: String(row?.hire_date || "").trim() || null,
+          comp_id: toNullableNumber(row?.comp_id),
+          dept_id: toNullableNumber(row?.dept_id),
+          status_id: toNullableNumber(row?.status_id),
+        };
+
+        if (isNew) {
+          const password = String(row?.password || "").trim();
+          if (!password) {
+            throw new Error(
+              `Password is required to save new user ${row?.username || row?.email || "(new user)"}.`
+            );
+          }
+
+          await callApi(
+            `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+            "POST",
+            {
+              ...payload,
+              password,
+            }
+          );
+          continue;
+        }
+
+        if (!rowDiff.isChanged) continue;
+
+        await callApi(
+          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            user_id: row.user_id,
+            ...payload,
+            ...(String(row?.password || "").trim()
+              ? { password: String(row.password) }
+              : {}),
+          }
+        );
+      }
+
+      invalidateUserMasterCache([
+        USER_MASTER_CACHE_KEYS.users,
+        USER_MASTER_CACHE_KEYS.bootstrap,
+        USER_MASTER_CACHE_KEYS.mappings,
+      ]);
+      await invalidateAccessCache();
+      await loadData({ forceFresh: true });
+      setInfo("Users batch saved.", "success");
+    } catch (error) {
+      setError(error?.message || "Unable to save users batch");
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    batchBaseline.users,
+    invalidateAccessCache,
+    loadData,
+    setError,
+    setInfo,
+    users,
+    usersDiff,
+  ]);
+
+  const saveCompaniesBatch = useCallback(async () => {
+    if (!companiesDiff.hasPendingChanges) return;
+
+    setBusy(true);
+    setFeedback({ text: "", variant: "info" });
+
+    try {
+      const draftCompanies = references.companies || [];
+      const baselineById = new Map(
+        (batchBaseline.companies || []).map((row) => [String(row?.comp_id), row])
+      );
+
+      for (const company of draftCompanies) {
+        const companyId = String(company?.comp_id || "");
+        if (!company?.__pendingRemove || !baselineById.has(companyId)) {
+          continue;
+        }
+
+        await callApi(
+          `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&comp_id=${encodeURIComponent(company.comp_id)}`,
+          "DELETE"
+        );
+      }
+
+      for (const company of draftCompanies) {
+        if (company?.__pendingRemove) continue;
+
+        const companyId = String(company?.comp_id || "");
+        const baselineCompany = baselineById.get(companyId);
+        const isNew = isTempId(companyId) || !baselineCompany;
+        const rowDiff = companiesDiff.byId.get(companyId) || DEFAULT_DIFF_ENTRY;
+
+        const payload = {
+          comp_name: String(company?.comp_name || "").trim() || null,
+          short_name: String(company?.short_name || "").trim() || null,
+          comp_email: String(company?.comp_email || "").trim() || null,
+          comp_phone: String(company?.comp_phone || "").trim() || null,
+          is_active: Boolean(company?.is_active),
+        };
+
+        if (!payload.comp_name) {
+          throw new Error("Company name is required before saving batch.");
+        }
+
+        if (isNew) {
+          await callApi(
+            `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+            "POST",
+            payload
+          );
+          continue;
+        }
+
+        if (!rowDiff.isChanged) continue;
+
+        await callApi(
+          `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            comp_id: company.comp_id,
+            ...payload,
+          }
+        );
+      }
+
+      invalidateUserMasterCache([
+        USER_MASTER_CACHE_KEYS.bootstrap,
+        USER_MASTER_CACHE_KEYS.users,
+      ]);
+      await loadData({ forceFresh: true });
+      setInfo("Companies batch saved.", "success");
+    } catch (error) {
+      setError(error?.message || "Unable to save companies batch");
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    batchBaseline.companies,
+    companiesDiff,
+    loadData,
+    references.companies,
+    setError,
+    setInfo,
+  ]);
+
+  const saveStatusesBatch = useCallback(async () => {
+    if (!statusesDiff.hasPendingChanges) return;
+
+    setBusy(true);
+    setFeedback({ text: "", variant: "info" });
+
+    try {
+      const draftStatuses = references.statuses || [];
+      const baselineById = new Map(
+        (batchBaseline.statuses || []).map((row) => [String(row?.status_id), row])
+      );
+
+      for (const status of draftStatuses) {
+        const statusId = String(status?.status_id || "");
+        if (!status?.__pendingRemove || !baselineById.has(statusId)) {
+          continue;
+        }
+
+        await callApi(
+          `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&status_id=${encodeURIComponent(status.status_id)}`,
+          "DELETE"
+        );
+      }
+
+      for (const status of draftStatuses) {
+        if (status?.__pendingRemove) continue;
+
+        const statusId = String(status?.status_id || "");
+        const baselineStatus = baselineById.get(statusId);
+        const isNew = isTempId(statusId) || !baselineStatus;
+        const rowDiff = statusesDiff.byId.get(statusId) || DEFAULT_DIFF_ENTRY;
+
+        const payload = {
+          sts_name: String(status?.sts_name || status?.status_name || "").trim() || null,
+          sts_desc: String(status?.sts_desc || status?.status_desc || "").trim() || null,
+          is_active: Boolean(status?.is_active),
+        };
+
+        if (!payload.sts_name) {
+          throw new Error("Status name is required before saving batch.");
+        }
+
+        if (isNew) {
+          await callApi(
+            `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+            "POST",
+            payload
+          );
+          continue;
+        }
+
+        if (!rowDiff.isChanged) continue;
+
+        await callApi(
+          `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            status_id: status.status_id,
+            ...payload,
+          }
+        );
+      }
+
+      invalidateUserMasterCache([
+        USER_MASTER_CACHE_KEYS.bootstrap,
+        USER_MASTER_CACHE_KEYS.users,
+      ]);
+      await loadData({ forceFresh: true });
+      setInfo("Statuses batch saved.", "success");
+    } catch (error) {
+      setError(error?.message || "Unable to save statuses batch");
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    batchBaseline.statuses,
+    loadData,
+    references.statuses,
+    setError,
+    setInfo,
+    statusesDiff,
+  ]);
+
+  const saveApplicationsBatch = useCallback(async () => {
+    if (!applicationsDiff.hasPendingChanges) return;
+
+    setBusy(true);
+    setFeedback({ text: "", variant: "info" });
+
+    try {
+      const draftApplications = references.applications || [];
+      const baselineById = new Map(
+        (batchBaseline.applications || []).map((row) => [String(row?.app_id), row])
+      );
+
+      for (const application of draftApplications) {
+        const appId = String(application?.app_id || "");
+        if (!application?.__pendingRemove || !baselineById.has(appId)) {
+          continue;
+        }
+
+        await callApi(
+          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&app_id=${encodeURIComponent(application.app_id)}`,
+          "DELETE"
+        );
+      }
+
+      for (const application of draftApplications) {
+        if (application?.__pendingRemove) continue;
+
+        const appId = String(application?.app_id || "");
+        const baselineApplication = baselineById.get(appId);
+        const isNew = isTempId(appId) || !baselineApplication;
+        const rowDiff = applicationsDiff.byId.get(appId) || DEFAULT_DIFF_ENTRY;
+
+        const payload = {
+          app_name: String(application?.app_name || "").trim() || null,
+          app_desc: String(application?.app_desc || "").trim() || null,
+          is_active: Boolean(application?.is_active),
+        };
+
+        if (!payload.app_name) {
+          throw new Error("Application name is required before saving batch.");
+        }
+
+        if (isNew) {
+          await callApi(
+            `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+            "POST",
+            payload
+          );
+          continue;
+        }
+
+        if (!rowDiff.isChanged) continue;
+
+        await callApi(
+          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          "PATCH",
+          {
+            app_id: application.app_id,
+            ...payload,
+          }
+        );
+      }
+
+      invalidateUserMasterCache([
+        USER_MASTER_CACHE_KEYS.bootstrap,
+        USER_MASTER_CACHE_KEYS.mappings,
+      ]);
+      await loadData({ forceFresh: true });
+      setInfo("Applications batch saved.", "success");
+    } catch (error) {
+      setError(error?.message || "Unable to save applications batch");
+    } finally {
+      setBusy(false);
+    }
+  }, [
+    applicationsDiff,
+    batchBaseline.applications,
+    loadData,
+    references.applications,
+    setError,
+    setInfo,
+  ]);
 
   const upsertAccessMappingInState = useCallback((nextMapping) => {
     if (!nextMapping || nextMapping.uar_id === null || nextMapping.uar_id === undefined) {
@@ -1049,67 +1673,50 @@ export default function AdminUserMasterPage() {
       return;
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    const stagedPayload = {
+      username: String(draft.username || "").trim() || null,
+      email: String(draft.email || "").trim() || null,
+      first_name: String(draft.first_name || "").trim() || null,
+      middle_name: String(draft.middle_name || "").trim() || null,
+      last_name: String(draft.last_name || "").trim() || null,
+      phone: String(draft.phone || "").trim() || null,
+      address: String(draft.address || "").trim() || null,
+      position: String(draft.position || "").trim() || null,
+      hire_date: String(draft.hire_date || "").trim() || null,
+      comp_id: toNullableNumber(draft.comp_id),
+      dept_id: toNullableNumber(draft.dept_id),
+      status_id: toNullableNumber(draft.status_id),
+      password: String(draft.password || "").trim() || "",
+      confirm_password: String(draft.confirm_password || "").trim() || "",
+    };
 
-    try {
-      const payload = {
-        username: String(draft.username || "").trim() || null,
-        email: String(draft.email || "").trim() || null,
-        first_name: String(draft.first_name || "").trim() || null,
-        middle_name: String(draft.middle_name || "").trim() || null,
-        last_name: String(draft.last_name || "").trim() || null,
-        phone: String(draft.phone || "").trim() || null,
-        address: String(draft.address || "").trim() || null,
-        position: String(draft.position || "").trim() || null,
-        hire_date: String(draft.hire_date || "").trim() || null,
-        comp_id: toNullableNumber(draft.comp_id),
-        dept_id: toNullableNumber(draft.dept_id),
-        status_id: toNullableNumber(draft.status_id),
-      };
-
-      if (userModal.mode === "create") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "POST",
-          {
-            ...payload,
-            password: String(draft.password || ""),
-          }
-        );
-
-        const nextUser = payloadResponse?.data?.user || payloadResponse?.user;
-        if (nextUser) {
-          upsertUserInState(nextUser);
-        }
-
-        setInfo(payloadResponse?.message || "User added.", "success");
-      } else {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "PATCH",
-          {
-            user_id: draft.user_id,
-            ...payload,
-            ...(String(draft.password || "").trim() ? { password: String(draft.password) } : {}),
-          }
-        );
-
-        const nextUser = payloadResponse?.data?.user || payloadResponse?.user;
-        if (nextUser) {
-          upsertUserInState(nextUser);
-        }
-
-        setInfo(payloadResponse?.message || "User updated.", "success");
-      }
-
-      closeUserModal();
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users, USER_MASTER_CACHE_KEYS.bootstrap]);
-    } catch (error) {
-      setError(error?.message || "Unable to save user");
-    } finally {
-      setBusy(false);
+    if (userModal.mode === "create") {
+      const tempUserId = createTempId("user");
+      setUsers((previous) => [
+        {
+          user_id: tempUserId,
+          ...stagedPayload,
+          is_active: true,
+          __pendingRemove: false,
+        },
+        ...(previous || []),
+      ]);
+      setInfo("User creation staged. Save Batch to apply.", "success");
+    } else {
+      setUsers((previous) =>
+        (previous || []).map((item) =>
+          String(item.user_id) === String(draft.user_id)
+            ? {
+                ...item,
+                ...stagedPayload,
+              }
+            : item
+        )
+      );
+      setInfo("User update staged. Save Batch to apply.", "success");
     }
+
+    closeUserModal();
   }
 
   async function submitUserDrawer(event) {
@@ -1139,46 +1746,33 @@ export default function AdminUserMasterPage() {
       }
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setUsers((previous) =>
+      (previous || []).map((item) =>
+        String(item.user_id) === String(draft.user_id)
+          ? {
+              ...item,
+              username: String(draft.username || "").trim() || null,
+              email: String(draft.email || "").trim() || null,
+              first_name: String(draft.first_name || "").trim() || null,
+              middle_name: String(draft.middle_name || "").trim() || null,
+              last_name: String(draft.last_name || "").trim() || null,
+              phone: String(draft.phone || "").trim() || null,
+              address: String(draft.address || "").trim() || null,
+              position: String(draft.position || "").trim() || null,
+              hire_date: String(draft.hire_date || "").trim() || null,
+              comp_id: toNullableNumber(draft.comp_id),
+              dept_id: toNullableNumber(draft.dept_id),
+              status_id: toNullableNumber(draft.status_id),
+              ...(userDrawer.setNewPassword && String(draft.password || "").trim()
+                ? { password: String(draft.password) }
+                : {}),
+            }
+          : item
+      )
+    );
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          user_id: draft.user_id,
-          username: String(draft.username || "").trim() || null,
-          email: String(draft.email || "").trim() || null,
-          first_name: String(draft.first_name || "").trim() || null,
-          middle_name: String(draft.middle_name || "").trim() || null,
-          last_name: String(draft.last_name || "").trim() || null,
-          phone: String(draft.phone || "").trim() || null,
-          address: String(draft.address || "").trim() || null,
-          position: String(draft.position || "").trim() || null,
-          hire_date: String(draft.hire_date || "").trim() || null,
-          comp_id: toNullableNumber(draft.comp_id),
-          dept_id: toNullableNumber(draft.dept_id),
-          status_id: toNullableNumber(draft.status_id),
-          ...(userDrawer.setNewPassword && String(draft.password || "").trim()
-            ? { password: String(draft.password) }
-            : {}),
-        }
-      );
-
-      const nextUser = payloadResponse?.data?.user || payloadResponse?.user;
-      if (nextUser) {
-        upsertUserInState(nextUser);
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users, USER_MASTER_CACHE_KEYS.bootstrap]);
-      setInfo(payloadResponse?.message || "User updated.", "success");
-      closeUserDrawer();
-    } catch (error) {
-      setError(error?.message || "Unable to save user");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("User update staged. Save Batch to apply.", "success");
+    closeUserDrawer();
   }
 
   async function deactivateUser(userId) {
@@ -1187,39 +1781,15 @@ export default function AdminUserMasterPage() {
       return;
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setUsers((previous) =>
+      (previous || []).map((item) =>
+        String(item.user_id) === String(userId)
+          ? { ...item, status_id: toNullableNumber(inactiveStatusId) }
+          : item
+      )
+    );
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          user_id: userId,
-          status_id: toNullableNumber(inactiveStatusId),
-        }
-      );
-
-      const nextUser = payloadResponse?.data?.user || payloadResponse?.user;
-      if (nextUser) {
-        upsertUserInState(nextUser);
-      } else {
-        setUsers((previous) =>
-          previous.map((item) =>
-            String(item.user_id) === String(userId)
-              ? { ...item, status_id: toNullableNumber(inactiveStatusId) }
-              : item
-          )
-        );
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users]);
-      setInfo(payloadResponse?.message || "User status updated to inactive.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to set inactive status");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("User status staged as inactive. Save Batch to apply.", "success");
   }
 
   async function activateUser(userId) {
@@ -1228,39 +1798,15 @@ export default function AdminUserMasterPage() {
       return;
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setUsers((previous) =>
+      (previous || []).map((item) =>
+        String(item.user_id) === String(userId)
+          ? { ...item, status_id: toNullableNumber(activeStatusId) }
+          : item
+      )
+    );
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          user_id: userId,
-          status_id: toNullableNumber(activeStatusId),
-        }
-      );
-
-      const nextUser = payloadResponse?.data?.user || payloadResponse?.user;
-      if (nextUser) {
-        upsertUserInState(nextUser);
-      } else {
-        setUsers((previous) =>
-          previous.map((item) =>
-            String(item.user_id) === String(userId)
-              ? { ...item, status_id: toNullableNumber(activeStatusId) }
-              : item
-          )
-        );
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.users]);
-      setInfo(payloadResponse?.message || "User status updated to active.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to set active status");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("User status staged as active. Save Batch to apply.", "success");
   }
 
   function openCreateRoleModal(appId = null) {
@@ -1481,129 +2027,60 @@ export default function AdminUserMasterPage() {
       return;
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    const stagedPayload = {
+      comp_name: String(draft.comp_name || "").trim(),
+      short_name: String(draft.short_name || "").trim() || null,
+      comp_email: String(draft.comp_email || "").trim() || null,
+      comp_phone: String(draft.comp_phone || "").trim() || null,
+      is_active: Boolean(draft.is_active),
+      __pendingRemove: false,
+    };
 
-    try {
-      const payload = {
-        comp_name: String(draft.comp_name || "").trim(),
-        short_name: String(draft.short_name || "").trim() || null,
-        comp_email: String(draft.comp_email || "").trim() || null,
-        comp_phone: String(draft.comp_phone || "").trim() || null,
-        is_active: Boolean(draft.is_active),
-      };
-
-      if (companyModal.mode === "create") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "POST",
-          payload
-        );
-
-        const nextCompany = payloadResponse?.data?.company || payloadResponse?.company;
-        if (nextCompany) {
-          upsertCompanyInState(nextCompany);
-        }
-
-        setInfo(payloadResponse?.message || "Company added.", "success");
-      } else {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "PATCH",
-          {
-            comp_id: draft.comp_id,
-            ...payload,
-          }
-        );
-
-        const nextCompany = payloadResponse?.data?.company || payloadResponse?.company;
-        if (nextCompany) {
-          upsertCompanyInState(nextCompany);
-        }
-
-        setInfo(payloadResponse?.message || "Company updated.", "success");
-      }
-
-      closeCompanyModal();
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.users,
-      ]);
-    } catch (error) {
-      setError(error?.message || "Unable to save company");
-    } finally {
-      setBusy(false);
+    if (companyModal.mode === "create") {
+      const tempCompId = createTempId("company");
+      setReferences((previous) => ({
+        ...previous,
+        companies: [{ comp_id: tempCompId, ...stagedPayload }, ...(previous.companies || [])],
+      }));
+      setInfo("Company creation staged. Save Batch to apply.", "success");
+    } else {
+      setReferences((previous) => ({
+        ...previous,
+        companies: (previous.companies || []).map((item) =>
+          String(item.comp_id) === String(draft.comp_id)
+            ? {
+                ...item,
+                ...stagedPayload,
+              }
+            : item
+        ),
+      }));
+      setInfo("Company update staged. Save Batch to apply.", "success");
     }
+
+    closeCompanyModal();
   }
 
   async function deactivateCompany(compId) {
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setReferences((previous) => ({
+      ...previous,
+      companies: (previous.companies || []).map((item) =>
+        String(item.comp_id) === String(compId) ? { ...item, is_active: false } : item
+      ),
+    }));
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          comp_id: compId,
-          is_active: false,
-        }
-      );
-
-      const nextCompany = payloadResponse?.data?.company || payloadResponse?.company;
-      if (nextCompany) {
-        upsertCompanyInState(nextCompany);
-      } else {
-        setReferences((previous) => ({
-          ...previous,
-          companies: (previous.companies || []).map((item) =>
-            String(item.comp_id) === String(compId) ? { ...item, is_active: false } : item
-          ),
-        }));
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
-      setInfo(payloadResponse?.message || "Company deactivated.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to deactivate company");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("Company status staged as inactive. Save Batch to apply.", "success");
   }
 
   async function activateCompany(compId) {
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setReferences((previous) => ({
+      ...previous,
+      companies: (previous.companies || []).map((item) =>
+        String(item.comp_id) === String(compId) ? { ...item, is_active: true } : item
+      ),
+    }));
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          comp_id: compId,
-          is_active: true,
-        }
-      );
-
-      const nextCompany = payloadResponse?.data?.company || payloadResponse?.company;
-      if (nextCompany) {
-        upsertCompanyInState(nextCompany);
-      } else {
-        setReferences((previous) => ({
-          ...previous,
-          companies: (previous.companies || []).map((item) =>
-            String(item.comp_id) === String(compId) ? { ...item, is_active: true } : item
-          ),
-        }));
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
-      setInfo(payloadResponse?.message || "Company activated.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to activate company");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("Company status staged as active. Save Batch to apply.", "success");
   }
 
   function toggleCompanyDetails(compId) {
@@ -1796,127 +2273,58 @@ export default function AdminUserMasterPage() {
       return;
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    const stagedPayload = {
+      sts_name: String(draft.sts_name || "").trim(),
+      sts_desc: String(draft.sts_desc || "").trim() || null,
+      is_active: Boolean(draft.is_active),
+      __pendingRemove: false,
+    };
 
-    try {
-      const payload = {
-        sts_name: String(draft.sts_name || "").trim(),
-        sts_desc: String(draft.sts_desc || "").trim() || null,
-        is_active: Boolean(draft.is_active),
-      };
-
-      if (statusModal.mode === "create") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "POST",
-          payload
-        );
-
-        const nextStatus = payloadResponse?.data?.status || payloadResponse?.status;
-        if (nextStatus) {
-          upsertStatusInState(nextStatus);
-        }
-
-        setInfo(payloadResponse?.message || "Status added.", "success");
-      } else {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "PATCH",
-          {
-            status_id: draft.status_id,
-            ...payload,
-          }
-        );
-
-        const nextStatus = payloadResponse?.data?.status || payloadResponse?.status;
-        if (nextStatus) {
-          upsertStatusInState(nextStatus);
-        }
-
-        setInfo(payloadResponse?.message || "Status updated.", "success");
-      }
-
-      closeStatusModal();
-      invalidateUserMasterCache([
-        USER_MASTER_CACHE_KEYS.bootstrap,
-        USER_MASTER_CACHE_KEYS.users,
-      ]);
-    } catch (error) {
-      setError(error?.message || "Unable to save status");
-    } finally {
-      setBusy(false);
+    if (statusModal.mode === "create") {
+      const tempStatusId = createTempId("status");
+      setReferences((previous) => ({
+        ...previous,
+        statuses: [{ status_id: tempStatusId, ...stagedPayload }, ...(previous.statuses || [])],
+      }));
+      setInfo("Status creation staged. Save Batch to apply.", "success");
+    } else {
+      setReferences((previous) => ({
+        ...previous,
+        statuses: (previous.statuses || []).map((item) =>
+          String(item.status_id) === String(draft.status_id)
+            ? {
+                ...item,
+                ...stagedPayload,
+              }
+            : item
+        ),
+      }));
+      setInfo("Status update staged. Save Batch to apply.", "success");
     }
+
+    closeStatusModal();
   }
 
   async function deactivateStatus(statusId) {
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setReferences((previous) => ({
+      ...previous,
+      statuses: (previous.statuses || []).map((item) =>
+        String(item.status_id) === String(statusId) ? { ...item, is_active: false } : item
+      ),
+    }));
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          status_id: statusId,
-          is_active: false,
-        }
-      );
-
-      const nextStatus = payloadResponse?.data?.status || payloadResponse?.status;
-      if (nextStatus) {
-        upsertStatusInState(nextStatus);
-      } else {
-        setReferences((previous) => ({
-          ...previous,
-          statuses: (previous.statuses || []).map((item) =>
-            String(item.status_id) === String(statusId) ? { ...item, is_active: false } : item
-          ),
-        }));
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
-      setInfo(payloadResponse?.message || "Status deactivated.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to deactivate status");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("Status staged as inactive. Save Batch to apply.", "success");
   }
 
   async function activateStatus(statusId) {
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setReferences((previous) => ({
+      ...previous,
+      statuses: (previous.statuses || []).map((item) =>
+        String(item.status_id) === String(statusId) ? { ...item, is_active: true } : item
+      ),
+    }));
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          status_id: statusId,
-          is_active: true,
-        }
-      );
-
-      const nextStatus = payloadResponse?.data?.status || payloadResponse?.status;
-      if (nextStatus) {
-        upsertStatusInState(nextStatus);
-      } else {
-        setReferences((previous) => ({
-          ...previous,
-          statuses: (previous.statuses || []).map((item) =>
-            String(item.status_id) === String(statusId) ? { ...item, is_active: true } : item
-          ),
-        }));
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
-      setInfo(payloadResponse?.message || "Status activated.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to activate status");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("Status staged as active. Save Batch to apply.", "success");
   }
 
   function openCreateApplicationModal() {
@@ -1953,126 +2361,58 @@ export default function AdminUserMasterPage() {
       return;
     }
 
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    const stagedPayload = {
+      app_name: String(draft.app_name || "").trim(),
+      app_desc: String(draft.app_desc || "").trim() || null,
+      is_active: Boolean(draft.is_active),
+      __pendingRemove: false,
+    };
 
-    try {
-      const payload = {
-        app_name: String(draft.app_name || "").trim(),
-        app_desc: String(draft.app_desc || "").trim() || null,
-        is_active: Boolean(draft.is_active),
-      };
-
-      if (applicationModal.mode === "create") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "POST",
-          payload
-        );
-
-        const nextApplication =
-          payloadResponse?.data?.application || payloadResponse?.application;
-        if (nextApplication) {
-          upsertApplicationInState(nextApplication);
-        }
-
-        setInfo(payloadResponse?.message || "Application added.", "success");
-      } else {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "PATCH",
-          {
-            app_id: draft.app_id,
-            ...payload,
-          }
-        );
-
-        const nextApplication =
-          payloadResponse?.data?.application || payloadResponse?.application;
-        if (nextApplication) {
-          upsertApplicationInState(nextApplication);
-        }
-
-        setInfo(payloadResponse?.message || "Application updated.", "success");
-      }
-
-      closeApplicationModal();
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
-    } catch (error) {
-      setError(error?.message || "Unable to save application");
-    } finally {
-      setBusy(false);
+    if (applicationModal.mode === "create") {
+      const tempAppId = createTempId("application");
+      setReferences((previous) => ({
+        ...previous,
+        applications: [{ app_id: tempAppId, ...stagedPayload }, ...(previous.applications || [])],
+      }));
+      setInfo("Application creation staged. Save Batch to apply.", "success");
+    } else {
+      setReferences((previous) => ({
+        ...previous,
+        applications: (previous.applications || []).map((item) =>
+          String(item.app_id) === String(draft.app_id)
+            ? {
+                ...item,
+                ...stagedPayload,
+              }
+            : item
+        ),
+      }));
+      setInfo("Application update staged. Save Batch to apply.", "success");
     }
+
+    closeApplicationModal();
   }
 
   async function deactivateApplication(appId) {
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setReferences((previous) => ({
+      ...previous,
+      applications: (previous.applications || []).map((item) =>
+        String(item.app_id) === String(appId) ? { ...item, is_active: false } : item
+      ),
+    }));
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          app_id: appId,
-          is_active: false,
-        }
-      );
-
-      const nextApplication = payloadResponse?.data?.application || payloadResponse?.application;
-      if (nextApplication) {
-        upsertApplicationInState(nextApplication);
-      } else {
-        setReferences((previous) => ({
-          ...previous,
-          applications: (previous.applications || []).map((item) =>
-            String(item.app_id) === String(appId) ? { ...item, is_active: false } : item
-          ),
-        }));
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
-      setInfo(payloadResponse?.message || "Application deactivated.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to deactivate application");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("Application staged as inactive. Save Batch to apply.", "success");
   }
 
   async function activateApplication(appId) {
-    setBusy(true);
-    setFeedback({ text: "", variant: "info" });
+    setReferences((previous) => ({
+      ...previous,
+      applications: (previous.applications || []).map((item) =>
+        String(item.app_id) === String(appId) ? { ...item, is_active: true } : item
+      ),
+    }));
 
-    try {
-      const payloadResponse = await callApi(
-        `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-        "PATCH",
-        {
-          app_id: appId,
-          is_active: true,
-        }
-      );
-
-      const nextApplication = payloadResponse?.data?.application || payloadResponse?.application;
-      if (nextApplication) {
-        upsertApplicationInState(nextApplication);
-      } else {
-        setReferences((previous) => ({
-          ...previous,
-          applications: (previous.applications || []).map((item) =>
-            String(item.app_id) === String(appId) ? { ...item, is_active: true } : item
-          ),
-        }));
-      }
-
-      invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
-      setInfo(payloadResponse?.message || "Application activated.", "success");
-    } catch (error) {
-      setError(error?.message || "Unable to activate application");
-    } finally {
-      setBusy(false);
-    }
+    setInfo("Application staged as active. Save Batch to apply.", "success");
   }
 
   function openCreateAccessModal(userId = "") {
@@ -2280,19 +2620,122 @@ export default function AdminUserMasterPage() {
       const id = removeModal.id;
 
       if (table === "users") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/users?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&user_id=${encodeURIComponent(id)}&hard=true`,
-          "DELETE"
+        if (isTempId(id)) {
+          setUsers((previous) =>
+            (previous || []).filter((item) => String(item.user_id) !== String(id))
+          );
+          closeRemoveModal();
+          setInfo("Staged new user removed.", "success");
+          return;
+        }
+
+        setUsers((previous) =>
+          (previous || []).map((item) =>
+            String(item.user_id) !== String(id)
+              ? item
+              : {
+                  ...item,
+                  __pendingRemove: !Boolean(item.__pendingRemove),
+                }
+          )
         );
 
-        setUsers((previous) => previous.filter((item) => String(item.user_id) !== String(id)));
-        invalidateUserMasterCache([
-          USER_MASTER_CACHE_KEYS.users,
-          USER_MASTER_CACHE_KEYS.mappings,
-          USER_MASTER_CACHE_KEYS.bootstrap,
-        ]);
-        setInfo(payloadResponse?.message || "User removed.", "success");
-      } else if (table === "roles") {
+        closeRemoveModal();
+        setInfo("User deletion staged. Save Batch to apply.", "success");
+        return;
+      }
+
+      if (table === "companies") {
+        if (isTempId(id)) {
+          setReferences((previous) => ({
+            ...previous,
+            companies: (previous.companies || []).filter(
+              (item) => String(item.comp_id) !== String(id)
+            ),
+          }));
+          closeRemoveModal();
+          setInfo("Staged new company removed.", "success");
+          return;
+        }
+
+        setReferences((previous) => ({
+          ...previous,
+          companies: (previous.companies || []).map((item) =>
+            String(item.comp_id) !== String(id)
+              ? item
+              : {
+                  ...item,
+                  __pendingRemove: !Boolean(item.__pendingRemove),
+                }
+          ),
+        }));
+
+        closeRemoveModal();
+        setInfo("Company deletion staged. Save Batch to apply.", "success");
+        return;
+      }
+
+      if (table === "statuses") {
+        if (isTempId(id)) {
+          setReferences((previous) => ({
+            ...previous,
+            statuses: (previous.statuses || []).filter(
+              (item) => String(item.status_id) !== String(id)
+            ),
+          }));
+          closeRemoveModal();
+          setInfo("Staged new status removed.", "success");
+          return;
+        }
+
+        setReferences((previous) => ({
+          ...previous,
+          statuses: (previous.statuses || []).map((item) =>
+            String(item.status_id) !== String(id)
+              ? item
+              : {
+                  ...item,
+                  __pendingRemove: !Boolean(item.__pendingRemove),
+                }
+          ),
+        }));
+
+        closeRemoveModal();
+        setInfo("Status deletion staged. Save Batch to apply.", "success");
+        return;
+      }
+
+      if (table === "applications") {
+        if (isTempId(id)) {
+          setReferences((previous) => ({
+            ...previous,
+            applications: (previous.applications || []).filter(
+              (item) => String(item.app_id) !== String(id)
+            ),
+          }));
+          closeRemoveModal();
+          setInfo("Staged new application removed.", "success");
+          return;
+        }
+
+        setReferences((previous) => ({
+          ...previous,
+          applications: (previous.applications || []).map((item) =>
+            String(item.app_id) !== String(id)
+              ? item
+              : {
+                  ...item,
+                  __pendingRemove: !Boolean(item.__pendingRemove),
+                }
+          ),
+        }));
+
+        closeRemoveModal();
+        setInfo("Application deletion staged. Save Batch to apply.", "success");
+        return;
+      }
+
+      if (table === "roles") {
         const payloadResponse = await callApi(
           `/api/user-master/admin/roles?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&role_id=${encodeURIComponent(id)}`,
           "DELETE"
@@ -2308,30 +2751,6 @@ export default function AdminUserMasterPage() {
           await loadRolesForApplication(selectedApplicationId, { forceFresh: true });
         }
         setInfo(payloadResponse?.message || "Role removed.", "success");
-      } else if (table === "companies") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/companies?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&comp_id=${encodeURIComponent(id)}`,
-          "DELETE"
-        );
-
-        setReferences((previous) => ({
-          ...previous,
-          companies: (previous.companies || []).filter((item) => String(item.comp_id) !== String(id)),
-        }));
-        invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
-        setInfo(payloadResponse?.message || "Company removed.", "success");
-      } else if (table === "statuses") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/statuses?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&status_id=${encodeURIComponent(id)}`,
-          "DELETE"
-        );
-
-        setReferences((previous) => ({
-          ...previous,
-          statuses: (previous.statuses || []).filter((item) => String(item.status_id) !== String(id)),
-        }));
-        invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
-        setInfo(payloadResponse?.message || "Status removed.", "success");
       } else if (table === "departments") {
         const payloadResponse = await callApi(
           `/api/user-master/admin/departments?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&dept_id=${encodeURIComponent(id)}`,
@@ -2346,20 +2765,6 @@ export default function AdminUserMasterPage() {
         }));
         invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.users]);
         setInfo(payloadResponse?.message || "Department removed.", "success");
-      } else if (table === "applications") {
-        const payloadResponse = await callApi(
-          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&app_id=${encodeURIComponent(id)}`,
-          "DELETE"
-        );
-
-        setReferences((previous) => ({
-          ...previous,
-          applications: (previous.applications || []).filter(
-            (item) => String(item.app_id) !== String(id)
-          ),
-        }));
-        invalidateUserMasterCache([USER_MASTER_CACHE_KEYS.bootstrap, USER_MASTER_CACHE_KEYS.mappings]);
-        setInfo(payloadResponse?.message || "Application removed.", "success");
       } else if (table === "access") {
         const payloadResponse = await callApi(
           `/api/user-master/admin/access-mappings?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&id=${encodeURIComponent(id)}`,
@@ -2395,6 +2800,10 @@ export default function AdminUserMasterPage() {
     : hasValue(roleModal?.draft?.app_id)
     ? `App ${roleModal.draft.app_id}`
     : "--";
+  const removeModalTableKey = String(removeModal?.table || "").toLowerCase();
+  const isBatchRemoveTable = ["users", "companies", "statuses", "applications"].includes(
+    removeModalTableKey
+  );
 
   if (loading) {
     return <Container className="py-4">Loading configuration...</Container>;
@@ -2438,6 +2847,19 @@ export default function AdminUserMasterPage() {
           </div>
         </div>
         <div className="d-flex gap-2">
+          {canManagePrivilegedSetup ? (
+            <Button
+              type="button"
+              variant="outline-primary"
+              onClick={() => {
+                startNavbarLoader();
+                router.push("/setup/admin/cards");
+              }}
+              disabled={busy}
+            >
+              Setup Cards
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="outline-secondary"
@@ -2455,16 +2877,44 @@ export default function AdminUserMasterPage() {
       <Tabs
         id="configuration-tabs"
         activeKey={activeTab}
-        onSelect={(key) => setActiveTab(key || "users")}
-        className="mb-3"
+        onSelect={(key) => {
+          if (isSingleSectionMode) return;
+          setActiveTab(key || "users");
+        }}
+        className={isSingleSectionMode ? "mb-0 d-none" : "mb-3"}
       >
         <Tab eventKey="users" title="Users">
           <Card>
             <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
               <span>Users</span>
-              <Button type="button" size="sm" onClick={openCreateUserModal} disabled={busy}>
-                Add User
-              </Button>
+              <div className="d-flex align-items-center gap-2">
+                <span className={`small setup-change-summary ${usersDiff.hasPendingChanges ? "is-dirty" : ""}`}>
+                  {usersDiff.hasPendingChanges
+                    ? `${usersDiff.newRows} new, ${usersDiff.modifiedRows} modified, ${usersDiff.removedRows} removed`
+                    : "No changes"}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline-success"
+                  onClick={() => void saveUsersBatch()}
+                  disabled={busy || !usersDiff.hasPendingChanges}
+                >
+                  Save Batch
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline-secondary"
+                  onClick={cancelUsersBatch}
+                  disabled={busy || !usersDiff.hasPendingChanges}
+                >
+                  Cancel Batch
+                </Button>
+                <Button type="button" size="sm" onClick={openCreateUserModal} disabled={busy}>
+                  Add User
+                </Button>
+              </div>
             </Card.Header>
             <Card.Body>
               <div>
@@ -2488,20 +2938,30 @@ export default function AdminUserMasterPage() {
                         </td>
                       </tr>
                     ) : users.map((user) => {
+                      const userId = String(user.user_id || "");
                       const company = companyLookup.get(String(user.comp_id || ""));
                       const department = departmentLookup.get(String(user.dept_id || ""));
                       const status = statusLookup.get(String(user.status_id || ""));
                       const userIsActive = isUserRecordActive(user);
+                      const userDiff = usersDiff.byId.get(userId) || DEFAULT_DIFF_ENTRY;
+                      const rowStateClass = userDiff.isPendingRemove
+                        ? "admin-row-pending-remove"
+                        : userDiff.isNew
+                        ? "admin-row-new"
+                        : userDiff.isChanged
+                        ? "admin-row-modified"
+                        : "";
 
                       return (
                         <tr
-                          key={String(user.user_id)}
-                          className={
-                            String(selectedUserId || "") === String(user.user_id)
-                              ? "admin-row-selected"
-                              : ""
-                          }
-                          onClick={() => openEditUserModal(user)}
+                          key={userId}
+                          className={`${
+                            String(selectedUserId || "") === userId ? "admin-row-selected" : ""
+                          } ${rowStateClass}`}
+                          onClick={() => {
+                            if (userDiff.isPendingRemove) return;
+                            openEditUserModal(user);
+                          }}
                         >
                           <td>
                             <div className="d-flex gap-1">
@@ -2511,9 +2971,10 @@ export default function AdminUserMasterPage() {
                                 variant="outline-primary"
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  if (userDiff.isPendingRemove) return;
                                   openEditUserModal(user);
                                 }}
-                                disabled={busy}
+                                disabled={busy || userDiff.isPendingRemove}
                                 aria-label="Edit user"
                                 title="Edit"
                               >
@@ -2530,7 +2991,7 @@ export default function AdminUserMasterPage() {
                                         event.stopPropagation();
                                         deactivateUser(user.user_id);
                                       }}
-                                      disabled={busy}
+                                      disabled={busy || userDiff.isPendingRemove}
                                       aria-label="Deactivate user"
                                       title="Deactivate"
                                     >
@@ -2545,7 +3006,7 @@ export default function AdminUserMasterPage() {
                                         event.stopPropagation();
                                         activateUser(user.user_id);
                                       }}
-                                      disabled={busy}
+                                      disabled={busy || userDiff.isPendingRemove}
                                       aria-label="Activate user"
                                       title="Activate"
                                     >
@@ -2555,7 +3016,7 @@ export default function AdminUserMasterPage() {
                                   <Button
                                     type="button"
                                     size="sm"
-                                    variant="outline-dark"
+                                    variant={userDiff.isPendingRemove ? "outline-warning" : "outline-dark"}
                                     onClick={(event) => {
                                       event.stopPropagation();
                                       openRemoveModal(
@@ -2565,25 +3026,50 @@ export default function AdminUserMasterPage() {
                                       );
                                     }}
                                     disabled={busy}
-                                    aria-label="Remove user"
-                                    title="Remove"
+                                    aria-label={userDiff.isPendingRemove ? "Undo remove user" : "Remove user"}
+                                    title={userDiff.isPendingRemove ? "Undo remove" : "Remove"}
                                   >
-                                    <i className="bi bi-trash" aria-hidden="true" />
+                                    <i
+                                      className={`bi ${
+                                        userDiff.isPendingRemove
+                                          ? "bi-arrow-counterclockwise"
+                                          : "bi-trash"
+                                      }`}
+                                      aria-hidden="true"
+                                    />
                                   </Button>
                                 </>
                               ) : null}
                             </div>
                           </td>
-                          <td>{user.username || "--"}</td>
-                          <td>
+                          <td className={userDiff.changedColumns.has("username") ? "admin-cell-changed" : ""}>
+                            {user.username || "--"}
+                          </td>
+                          <td
+                            className={
+                              userDiff.changedColumns.has("first_name") ||
+                              userDiff.changedColumns.has("middle_name") ||
+                              userDiff.changedColumns.has("last_name")
+                                ? "admin-cell-changed"
+                                : ""
+                            }
+                          >
                             {[user.first_name, user.middle_name, user.last_name]
                               .filter(Boolean)
                               .join(" ") || "--"}
                           </td>
-                          <td>{user.email || "--"}</td>
-                          <td>{company ? getLabel(company, ["comp_name"]) : "--"}</td>
-                          <td>{department ? getLabel(department, ["dept_name"]) : "--"}</td>
-                          <td>{status ? getLabel(status, ["sts_name", "status_name"]) : "--"}</td>
+                          <td className={userDiff.changedColumns.has("email") ? "admin-cell-changed" : ""}>
+                            {user.email || "--"}
+                          </td>
+                          <td className={userDiff.changedColumns.has("comp_id") ? "admin-cell-changed" : ""}>
+                            {company ? getLabel(company, ["comp_name"]) : "--"}
+                          </td>
+                          <td className={userDiff.changedColumns.has("dept_id") ? "admin-cell-changed" : ""}>
+                            {department ? getLabel(department, ["dept_name"]) : "--"}
+                          </td>
+                          <td className={userDiff.changedColumns.has("status_id") ? "admin-cell-changed" : ""}>
+                            {status ? getLabel(status, ["sts_name", "status_name"]) : "--"}
+                          </td>
                         </tr>
                       );
                     })}
@@ -2598,9 +3084,34 @@ export default function AdminUserMasterPage() {
           <Card>
             <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
               <span>Companies</span>
-              <Button type="button" size="sm" onClick={openCreateCompanyModal} disabled={busy}>
-                Add Company
-              </Button>
+              <div className="d-flex align-items-center gap-2">
+                <span className={`small setup-change-summary ${companiesDiff.hasPendingChanges ? "is-dirty" : ""}`}>
+                  {companiesDiff.hasPendingChanges
+                    ? `${companiesDiff.newRows} new, ${companiesDiff.modifiedRows} modified, ${companiesDiff.removedRows} removed`
+                    : "No changes"}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline-success"
+                  onClick={() => void saveCompaniesBatch()}
+                  disabled={busy || !companiesDiff.hasPendingChanges}
+                >
+                  Save Batch
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline-secondary"
+                  onClick={cancelCompaniesBatch}
+                  disabled={busy || !companiesDiff.hasPendingChanges}
+                >
+                  Cancel Batch
+                </Button>
+                <Button type="button" size="sm" onClick={openCreateCompanyModal} disabled={busy}>
+                  Add Company
+                </Button>
+              </div>
             </Card.Header>
             <Card.Body>
               <Table size="sm" bordered hover className="admin-data-table">
@@ -2617,16 +3128,28 @@ export default function AdminUserMasterPage() {
                 </thead>
                 <tbody>
                   {references.companies.map((company) => {
+                    const companyId = String(company.comp_id || "");
                     const isExpanded = String(expandedCompanyId || "") === String(company.comp_id);
                     const companyDepartments = (references.departments || []).filter(
                       (department) => String(department.comp_id || "") === String(company.comp_id)
                     );
+                    const companyDiff = companiesDiff.byId.get(companyId) || DEFAULT_DIFF_ENTRY;
+                    const rowStateClass = companyDiff.isPendingRemove
+                      ? "admin-row-pending-remove"
+                      : companyDiff.isNew
+                      ? "admin-row-new"
+                      : companyDiff.isChanged
+                      ? "admin-row-modified"
+                      : "";
 
                     return (
-                      <Fragment key={String(company.comp_id)}>
+                      <Fragment key={companyId}>
                         <tr
-                          className={isExpanded ? "admin-row-selected" : ""}
-                          onClick={() => toggleCompanyDetails(company.comp_id)}
+                          className={`${isExpanded ? "admin-row-selected" : ""} ${rowStateClass}`}
+                          onClick={() => {
+                            if (companyDiff.isPendingRemove) return;
+                            toggleCompanyDetails(company.comp_id);
+                          }}
                         >
                           <td>
                             <div className="d-flex gap-1">
@@ -2636,9 +3159,10 @@ export default function AdminUserMasterPage() {
                                 variant="outline-primary"
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  if (companyDiff.isPendingRemove) return;
                                   openEditCompanyModal(company);
                                 }}
-                                disabled={busy}
+                                disabled={busy || companyDiff.isPendingRemove}
                                 aria-label="Edit company"
                                 title="Edit"
                               >
@@ -2655,7 +3179,7 @@ export default function AdminUserMasterPage() {
                                         event.stopPropagation();
                                         deactivateCompany(company.comp_id);
                                       }}
-                                      disabled={busy}
+                                      disabled={busy || companyDiff.isPendingRemove}
                                       aria-label="Deactivate company"
                                       title="Deactivate"
                                     >
@@ -2670,7 +3194,7 @@ export default function AdminUserMasterPage() {
                                         event.stopPropagation();
                                         activateCompany(company.comp_id);
                                       }}
-                                      disabled={busy}
+                                      disabled={busy || companyDiff.isPendingRemove}
                                       aria-label="Activate company"
                                       title="Activate"
                                     >
@@ -2680,7 +3204,7 @@ export default function AdminUserMasterPage() {
                                   <Button
                                     type="button"
                                     size="sm"
-                                    variant="outline-dark"
+                                    variant={companyDiff.isPendingRemove ? "outline-warning" : "outline-dark"}
                                     onClick={(event) => {
                                       event.stopPropagation();
                                       openRemoveModal(
@@ -2690,21 +3214,38 @@ export default function AdminUserMasterPage() {
                                       );
                                     }}
                                     disabled={busy}
-                                    aria-label="Remove company"
-                                    title="Remove"
+                                    aria-label={
+                                      companyDiff.isPendingRemove ? "Undo remove company" : "Remove company"
+                                    }
+                                    title={companyDiff.isPendingRemove ? "Undo remove" : "Remove"}
                                   >
-                                    <i className="bi bi-trash" aria-hidden="true" />
+                                    <i
+                                      className={`bi ${
+                                        companyDiff.isPendingRemove
+                                          ? "bi-arrow-counterclockwise"
+                                          : "bi-trash"
+                                      }`}
+                                      aria-hidden="true"
+                                    />
                                   </Button>
                                 </>
                               ) : null}
                             </div>
                           </td>
                           <td>{company.comp_id}</td>
-                          <td>{company.comp_name || "--"}</td>
-                          <td>{company.short_name || "--"}</td>
-                          <td>{company.comp_email || "--"}</td>
-                          <td>{company.comp_phone || "--"}</td>
-                          <td>
+                          <td className={companyDiff.changedColumns.has("comp_name") ? "admin-cell-changed" : ""}>
+                            {company.comp_name || "--"}
+                          </td>
+                          <td className={companyDiff.changedColumns.has("short_name") ? "admin-cell-changed" : ""}>
+                            {company.short_name || "--"}
+                          </td>
+                          <td className={companyDiff.changedColumns.has("comp_email") ? "admin-cell-changed" : ""}>
+                            {company.comp_email || "--"}
+                          </td>
+                          <td className={companyDiff.changedColumns.has("comp_phone") ? "admin-cell-changed" : ""}>
+                            {company.comp_phone || "--"}
+                          </td>
+                          <td className={companyDiff.changedColumns.has("is_active") ? "admin-cell-changed" : ""}>
                             <Badge bg={company.is_active ? "success" : "secondary"}>
                               {company.is_active ? "Active" : "Inactive"}
                             </Badge>
@@ -2720,7 +3261,7 @@ export default function AdminUserMasterPage() {
                                   <Button
                                     size="sm"
                                     onClick={() => openCreateDepartmentModal(company.comp_id)}
-                                    disabled={busy}
+                                    disabled={busy || companyDiff.isPendingRemove}
                                   >
                                     Add Department
                                   </Button>
@@ -2826,9 +3367,34 @@ export default function AdminUserMasterPage() {
           <Card>
             <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
               <span>Statuses</span>
-              <Button type="button" size="sm" onClick={openCreateStatusModal} disabled={busy}>
-                Add Status
-              </Button>
+              <div className="d-flex align-items-center gap-2">
+                <span className={`small setup-change-summary ${statusesDiff.hasPendingChanges ? "is-dirty" : ""}`}>
+                  {statusesDiff.hasPendingChanges
+                    ? `${statusesDiff.newRows} new, ${statusesDiff.modifiedRows} modified, ${statusesDiff.removedRows} removed`
+                    : "No changes"}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline-success"
+                  onClick={() => void saveStatusesBatch()}
+                  disabled={busy || !statusesDiff.hasPendingChanges}
+                >
+                  Save Batch
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline-secondary"
+                  onClick={cancelStatusesBatch}
+                  disabled={busy || !statusesDiff.hasPendingChanges}
+                >
+                  Cancel Batch
+                </Button>
+                <Button type="button" size="sm" onClick={openCreateStatusModal} disabled={busy}>
+                  Add Status
+                </Button>
+              </div>
             </Card.Header>
             <Card.Body>
               <Table size="sm" bordered hover className="admin-data-table">
@@ -2842,8 +3408,19 @@ export default function AdminUserMasterPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {references.statuses.map((status) => (
-                    <tr key={String(status.status_id)}>
+                  {references.statuses.map((status) => {
+                    const statusId = String(status.status_id || "");
+                    const statusDiff = statusesDiff.byId.get(statusId) || DEFAULT_DIFF_ENTRY;
+                    const rowStateClass = statusDiff.isPendingRemove
+                      ? "admin-row-pending-remove"
+                      : statusDiff.isNew
+                      ? "admin-row-new"
+                      : statusDiff.isChanged
+                      ? "admin-row-modified"
+                      : "";
+
+                    return (
+                    <tr key={statusId} className={rowStateClass}>
                       <td>
                         <div className="d-flex gap-1">
                           <Button
@@ -2851,7 +3428,7 @@ export default function AdminUserMasterPage() {
                             size="sm"
                             variant="outline-primary"
                             onClick={() => openEditStatusModal(status)}
-                            disabled={busy}
+                            disabled={busy || statusDiff.isPendingRemove}
                             aria-label="Edit status"
                             title="Edit"
                           >
@@ -2863,7 +3440,7 @@ export default function AdminUserMasterPage() {
                               size="sm"
                               variant="outline-danger"
                               onClick={() => deactivateStatus(status.status_id)}
-                              disabled={busy}
+                              disabled={busy || statusDiff.isPendingRemove}
                               aria-label="Deactivate status"
                               title="Deactivate"
                             >
@@ -2875,7 +3452,7 @@ export default function AdminUserMasterPage() {
                               size="sm"
                               variant="outline-success"
                               onClick={() => activateStatus(status.status_id)}
-                              disabled={busy}
+                              disabled={busy || statusDiff.isPendingRemove}
                               aria-label="Activate status"
                               title="Activate"
                             >
@@ -2885,7 +3462,7 @@ export default function AdminUserMasterPage() {
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline-dark"
+                            variant={statusDiff.isPendingRemove ? "outline-warning" : "outline-dark"}
                             onClick={() =>
                               openRemoveModal(
                                 "statuses",
@@ -2894,23 +3471,32 @@ export default function AdminUserMasterPage() {
                               )
                             }
                             disabled={busy}
-                            aria-label="Remove status"
-                            title="Remove"
+                            aria-label={statusDiff.isPendingRemove ? "Undo remove status" : "Remove status"}
+                            title={statusDiff.isPendingRemove ? "Undo remove" : "Remove"}
                           >
-                            <i className="bi bi-trash" aria-hidden="true" />
+                            <i
+                              className={`bi ${
+                                statusDiff.isPendingRemove ? "bi-arrow-counterclockwise" : "bi-trash"
+                              }`}
+                              aria-hidden="true"
+                            />
                           </Button>
                         </div>
                       </td>
                       <td>{status.status_id}</td>
-                      <td>{status.sts_name || status.status_name || "--"}</td>
-                      <td>{status.sts_desc || status.status_desc || "--"}</td>
-                      <td>
+                      <td className={statusDiff.changedColumns.has("sts_name") ? "admin-cell-changed" : ""}>
+                        {status.sts_name || status.status_name || "--"}
+                      </td>
+                      <td className={statusDiff.changedColumns.has("sts_desc") ? "admin-cell-changed" : ""}>
+                        {status.sts_desc || status.status_desc || "--"}
+                      </td>
+                      <td className={statusDiff.changedColumns.has("is_active") ? "admin-cell-changed" : ""}>
                         <Badge bg={status.is_active ? "success" : "secondary"}>
                           {status.is_active ? "Active" : "Inactive"}
                         </Badge>
                       </td>
                     </tr>
-                  ))}
+                  );})}
                 </tbody>
               </Table>
             </Card.Body>
@@ -2925,9 +3511,38 @@ export default function AdminUserMasterPage() {
               <Card>
                 <Card.Header className="d-flex align-items-center justify-content-between fw-bold">
                   <span>Applications</span>
-                  <Button type="button" size="sm" onClick={openCreateApplicationModal} disabled={busy}>
-                    Add Application
-                  </Button>
+                  <div className="d-flex align-items-center gap-2">
+                    <span
+                      className={`small setup-change-summary ${
+                        applicationsDiff.hasPendingChanges ? "is-dirty" : ""
+                      }`}
+                    >
+                      {applicationsDiff.hasPendingChanges
+                        ? `${applicationsDiff.newRows} new, ${applicationsDiff.modifiedRows} modified, ${applicationsDiff.removedRows} removed`
+                        : "No changes"}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline-success"
+                      onClick={() => void saveApplicationsBatch()}
+                      disabled={busy || !applicationsDiff.hasPendingChanges}
+                    >
+                      Save Batch
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline-secondary"
+                      onClick={cancelApplicationsBatch}
+                      disabled={busy || !applicationsDiff.hasPendingChanges}
+                    >
+                      Cancel Batch
+                    </Button>
+                    <Button type="button" size="sm" onClick={openCreateApplicationModal} disabled={busy}>
+                      Add Application
+                    </Button>
+                  </div>
                 </Card.Header>
                 <Card.Body>
                   <Table size="sm" bordered hover className="admin-data-table mb-0">
@@ -2940,15 +3555,27 @@ export default function AdminUserMasterPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(references.applications || []).map((application) => (
+                      {(references.applications || []).map((application) => {
+                        const appId = String(application.app_id || "");
+                        const applicationDiff = applicationsDiff.byId.get(appId) || DEFAULT_DIFF_ENTRY;
+                        const rowStateClass = applicationDiff.isPendingRemove
+                          ? "admin-row-pending-remove"
+                          : applicationDiff.isNew
+                          ? "admin-row-new"
+                          : applicationDiff.isChanged
+                          ? "admin-row-modified"
+                          : "";
+
+                        return (
                         <tr
-                          key={String(application.app_id)}
-                          className={
-                            String(selectedApplicationId || "") === String(application.app_id)
-                              ? "admin-row-selected"
-                              : ""
-                          }
-                          onClick={() => setSelectedApplicationId(asSelectValue(application.app_id))}
+                          key={appId}
+                          className={`${
+                            String(selectedApplicationId || "") === appId ? "admin-row-selected" : ""
+                          } ${rowStateClass}`}
+                          onClick={() => {
+                            if (applicationDiff.isPendingRemove) return;
+                            setSelectedApplicationId(asSelectValue(application.app_id));
+                          }}
                         >
                           <td>
                             <div className="d-flex gap-1">
@@ -2958,9 +3585,10 @@ export default function AdminUserMasterPage() {
                                 variant="outline-primary"
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  if (applicationDiff.isPendingRemove) return;
                                   openEditApplicationModal(application);
                                 }}
-                                disabled={busy}
+                                disabled={busy || applicationDiff.isPendingRemove}
                                 aria-label="Edit application"
                                 title="Edit"
                               >
@@ -2975,7 +3603,7 @@ export default function AdminUserMasterPage() {
                                     event.stopPropagation();
                                     deactivateApplication(application.app_id);
                                   }}
-                                  disabled={busy}
+                                  disabled={busy || applicationDiff.isPendingRemove}
                                   aria-label="Deactivate application"
                                   title="Deactivate"
                                 >
@@ -2990,7 +3618,7 @@ export default function AdminUserMasterPage() {
                                     event.stopPropagation();
                                     activateApplication(application.app_id);
                                   }}
-                                  disabled={busy}
+                                  disabled={busy || applicationDiff.isPendingRemove}
                                   aria-label="Activate application"
                                   title="Activate"
                                 >
@@ -3000,7 +3628,7 @@ export default function AdminUserMasterPage() {
                               <Button
                                 type="button"
                                 size="sm"
-                                variant="outline-dark"
+                                variant={applicationDiff.isPendingRemove ? "outline-warning" : "outline-dark"}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   openRemoveModal(
@@ -3010,22 +3638,37 @@ export default function AdminUserMasterPage() {
                                   );
                                 }}
                                 disabled={busy}
-                                aria-label="Remove application"
-                                title="Remove"
+                                aria-label={
+                                  applicationDiff.isPendingRemove
+                                    ? "Undo remove application"
+                                    : "Remove application"
+                                }
+                                title={applicationDiff.isPendingRemove ? "Undo remove" : "Remove"}
                               >
-                                <i className="bi bi-trash" aria-hidden="true" />
+                                <i
+                                  className={`bi ${
+                                    applicationDiff.isPendingRemove
+                                      ? "bi-arrow-counterclockwise"
+                                      : "bi-trash"
+                                  }`}
+                                  aria-hidden="true"
+                                />
                               </Button>
                             </div>
                           </td>
-                          <td>{application.app_name || "--"}</td>
-                          <td>{application.app_desc || "--"}</td>
-                          <td>
+                          <td className={applicationDiff.changedColumns.has("app_name") ? "admin-cell-changed" : ""}>
+                            {application.app_name || "--"}
+                          </td>
+                          <td className={applicationDiff.changedColumns.has("app_desc") ? "admin-cell-changed" : ""}>
+                            {application.app_desc || "--"}
+                          </td>
+                          <td className={applicationDiff.changedColumns.has("is_active") ? "admin-cell-changed" : ""}>
                             <Badge bg={application.is_active ? "success" : "secondary"}>
                               {application.is_active ? "Active" : "Inactive"}
                             </Badge>
                           </td>
                         </tr>
-                      ))}
+                      );})}
                     </tbody>
                   </Table>
                 </Card.Body>
@@ -3042,7 +3685,12 @@ export default function AdminUserMasterPage() {
                     type="button"
                     size="sm"
                     onClick={() => openCreateRoleModal(selectedApplicationId)}
-                    disabled={busy || !hasValue(selectedApplicationId)}
+                    disabled={
+                      busy ||
+                      !hasValue(selectedApplicationId) ||
+                      isTempId(selectedApplicationId) ||
+                      selectedApplicationIsPendingRemove
+                    }
                   >
                     Add Role
                   </Button>
@@ -3051,6 +3699,14 @@ export default function AdminUserMasterPage() {
                   {!hasValue(selectedApplicationId) ? (
                     <div className="notice-banner notice-banner-muted mb-0">
                       Select an application to manage roles.
+                    </div>
+                  ) : isTempId(selectedApplicationId) ? (
+                    <div className="notice-banner notice-banner-muted mb-0">
+                      Save the new application first, then roles can be managed.
+                    </div>
+                  ) : selectedApplicationIsPendingRemove ? (
+                    <div className="notice-banner notice-banner-muted mb-0">
+                      Undo application removal or save batch before managing roles.
                     </div>
                   ) : loadingApplicationRoles ? (
                     <div className="text-muted">Loading roles...</div>
@@ -3144,15 +3800,6 @@ export default function AdminUserMasterPage() {
               </Card>
             </Col>
           </Row>
-            </Tab>
-        ) : null}
-
-        {canManagePrivilegedSetup ? (
-          <Tab eventKey="cards" title="Setup • Cards">
-              <SetupCardsTab
-                applications={references.applications}
-                roles={references.roles}
-              />
             </Tab>
         ) : null}
 
@@ -3383,7 +4030,7 @@ export default function AdminUserMasterPage() {
               Cancel
             </Button>
             <Button type="submit" disabled={busy}>
-              {busy ? "Saving..." : "Add User"}
+              {busy ? "Saving..." : "Stage User"}
             </Button>
           </Modal.Footer>
         </Form>
@@ -4018,7 +4665,7 @@ export default function AdminUserMasterPage() {
               Cancel
             </Button>
             <Button type="submit" disabled={busy}>
-              {busy ? "Saving..." : companyModal.mode === "create" ? "Add Company" : "Save Changes"}
+              {busy ? "Saving..." : companyModal.mode === "create" ? "Stage Company" : "Stage Changes"}
             </Button>
           </Modal.Footer>
         </Form>
@@ -4078,7 +4725,7 @@ export default function AdminUserMasterPage() {
               Cancel
             </Button>
             <Button type="submit" disabled={busy}>
-              {busy ? "Saving..." : statusModal.mode === "create" ? "Add Status" : "Save Changes"}
+              {busy ? "Saving..." : statusModal.mode === "create" ? "Stage Status" : "Stage Changes"}
             </Button>
           </Modal.Footer>
         </Form>
@@ -4215,8 +4862,8 @@ export default function AdminUserMasterPage() {
               {busy
                 ? "Saving..."
                 : applicationModal.mode === "create"
-                ? "Add Application"
-                : "Save Changes"}
+                ? "Stage Application"
+                : "Stage Changes"}
             </Button>
           </Modal.Footer>
         </Form>
@@ -4228,7 +4875,16 @@ export default function AdminUserMasterPage() {
         </Modal.Header>
         <Modal.Body>
           <p className="mb-0">
-            Remove <strong>{removeModal.label || "this record"}</strong>? This cannot be undone.
+            {isBatchRemoveTable ? (
+              <>
+                Stage removal for <strong>{removeModal.label || "this record"}</strong>? Save Batch is
+                required to commit.
+              </>
+            ) : (
+              <>
+                Remove <strong>{removeModal.label || "this record"}</strong>? This cannot be undone.
+              </>
+            )}
           </p>
         </Modal.Body>
         <Modal.Footer>
@@ -4236,7 +4892,7 @@ export default function AdminUserMasterPage() {
             Cancel
           </Button>
           <Button type="button" variant="danger" onClick={confirmRemoveRecord} disabled={busy}>
-            {busy ? "Removing..." : "Remove"}
+            {busy ? "Processing..." : isBatchRemoveTable ? "Stage Remove" : "Remove"}
           </Button>
         </Modal.Footer>
       </Modal>

@@ -1,5 +1,5 @@
-import AdminSetupPage from "@/modules/user-master/components/admin-setup.page";
+import { redirect } from "next/navigation";
 
 export default function SetupAdminRoutePage() {
-  return <AdminSetupPage />;
+  redirect("/setup/admin/users");
 }

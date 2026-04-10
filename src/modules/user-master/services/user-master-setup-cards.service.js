@@ -100,20 +100,24 @@ async function assertRolesBelongToApp(supabaseClient, roleIds, appId) {
 
 function ensureUniqueGroupOrder(groups, appId) {
   const seen = new Set();
+  const duplicates = [];
+
   for (const group of groups) {
     const key = String(group.display_order);
     if (seen.has(key)) {
-      throw withStatus(
-        `Duplicate group display_order ${group.display_order} for app_id ${appId}`,
-        409
+      duplicates.push(
+        `Duplicate group display_order ${group.display_order} for app_id ${appId}`
       );
     }
     seen.add(key);
   }
+
+  return duplicates;
 }
 
 function ensureUniqueCardOrder(cards, appId) {
   const seenByGroup = new Map();
+  const duplicates = [];
 
   for (const card of cards) {
     const groupId = asText(card.group_id);
@@ -124,13 +128,71 @@ function ensureUniqueCardOrder(cards, appId) {
     const orderSet = seenByGroup.get(groupId);
     const orderKey = String(card.display_order);
     if (orderSet.has(orderKey)) {
-      throw withStatus(
-        `Duplicate card display_order ${card.display_order} in group_id ${groupId}, app_id ${appId}`,
-        409
+      duplicates.push(
+        `Duplicate card display_order ${card.display_order} in group_id ${groupId}, app_id ${appId}`
       );
     }
 
     orderSet.add(orderKey);
+  }
+
+  return duplicates;
+}
+
+async function assertGroupDisplayOrderAvailable(
+  supabaseClient,
+  { appId, displayOrder, excludeGroupId = null }
+) {
+  if (!hasValue(appId)) return;
+
+  let query = supabaseClient
+    .from(APP_CARD_GROUP_TABLE)
+    .select("group_id")
+    .eq("app_id", appId)
+    .eq("display_order", asNumber(displayOrder, 0))
+    .limit(1);
+
+  if (hasValue(excludeGroupId)) {
+    query = query.neq("group_id", excludeGroupId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  if (Array.isArray(data) && data.length > 0) {
+    throw withStatus(
+      `Display order ${asNumber(displayOrder, 0)} already exists for this application`,
+      409
+    );
+  }
+}
+
+async function assertCardDisplayOrderAvailable(
+  supabaseClient,
+  { appId, groupId, displayOrder, excludeCardId = null }
+) {
+  if (!hasValue(groupId) || !hasValue(appId)) return;
+
+  let query = supabaseClient
+    .from(APP_CARD_TABLE)
+    .select("card_id")
+    .eq("app_id", appId)
+    .eq("group_id", groupId)
+    .eq("display_order", asNumber(displayOrder, 0))
+    .limit(1);
+
+  if (hasValue(excludeCardId)) {
+    query = query.neq("card_id", excludeCardId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+
+  if (Array.isArray(data) && data.length > 0) {
+    throw withStatus(
+      `Display order ${asNumber(displayOrder, 0)} already exists in this group`,
+      409
+    );
   }
 }
 
@@ -419,6 +481,11 @@ export async function POST(request) {
         return toErrorResponse("group_name is required", 400);
       }
 
+      await assertGroupDisplayOrderAvailable(gate.context.supabaseClient, {
+        appId,
+        displayOrder: payload.display_order,
+      });
+
       const { data, error } = await gate.context.supabaseClient
         .from(APP_CARD_GROUP_TABLE)
         .insert(payload)
@@ -468,6 +535,12 @@ export async function POST(request) {
       if (!hasValue(payload.route_path)) {
         return toErrorResponse("route_path is required", 400);
       }
+
+      await assertCardDisplayOrderAvailable(gate.context.supabaseClient, {
+        appId,
+        groupId,
+        displayOrder: payload.display_order,
+      });
 
       const { data: card, error: cardError } = await gate.context.supabaseClient
         .from(APP_CARD_TABLE)
@@ -573,6 +646,18 @@ export async function PATCH(request) {
         return toErrorResponse("No group update fields were provided", 400);
       }
 
+      const groupDisplayOrderChanged =
+        Object.prototype.hasOwnProperty.call(updates, "display_order") &&
+        asNumber(updates.display_order, 0) !== asNumber(existingGroup.display_order, 0);
+
+      if (groupDisplayOrderChanged) {
+        await assertGroupDisplayOrderAvailable(gate.context.supabaseClient, {
+          appId: existingGroup.app_id,
+          displayOrder: updates.display_order,
+          excludeGroupId: groupId,
+        });
+      }
+
       const { data: group, error: groupError } = await gate.context.supabaseClient
         .from(APP_CARD_GROUP_TABLE)
         .update(updates)
@@ -634,6 +719,7 @@ export async function PATCH(request) {
 
       const group = await assertGroupExists(gate.context.supabaseClient, resolvedGroupId);
       const groupIsActive = toBooleanFlag(group?.is_active);
+      const groupChanged = asText(existingCard.group_id) !== resolvedGroupId;
 
       const updates = {
         app_id: resolvedAppId,
@@ -682,6 +768,26 @@ export async function PATCH(request) {
 
       if (hasOnlyIdentityFields) {
         return toErrorResponse("No card update fields were provided", 400);
+      }
+
+      const displayOrderProvided =
+        Object.prototype.hasOwnProperty.call(body || {}, "display_order") ||
+        Object.prototype.hasOwnProperty.call(body || {}, "displayOrder");
+
+      const nextDisplayOrder = displayOrderProvided
+        ? asNumber(updates.display_order, 0)
+        : asNumber(existingCard.display_order, 0);
+
+      const cardDisplayOrderChanged =
+        nextDisplayOrder !== asNumber(existingCard.display_order, 0);
+
+      if (cardDisplayOrderChanged || groupChanged) {
+        await assertCardDisplayOrderAvailable(gate.context.supabaseClient, {
+          appId: resolvedAppId,
+          groupId: resolvedGroupId,
+          displayOrder: nextDisplayOrder,
+          excludeCardId: cardId,
+        });
       }
 
       const { data: card, error: cardError } = await gate.context.supabaseClient

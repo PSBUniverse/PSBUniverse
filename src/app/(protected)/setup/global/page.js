@@ -1,5 +1,5 @@
-import GlobalSetupPage from "@/modules/gutter/components/global-setup.page";
+import CoreSetupPage from "@/modules/user-master/components/core-setup.page";
 
 export default function SetupGlobalRoutePage() {
-  return <GlobalSetupPage />;
+  return <CoreSetupPage />;
 }

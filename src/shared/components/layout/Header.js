@@ -45,17 +45,13 @@ function isConfigurationPath(pathname) {
   return path.startsWith("/setup");
 }
 
-function isMyAppsPath(pathname, showConfiguration) {
+function isMyAppsPath(pathname) {
   if (isMyPsbPath(pathname)) {
     return false;
   }
 
-  if (!showConfiguration && isConfigurationPath(pathname)) {
-    return true;
-  }
-
   if (isConfigurationPath(pathname)) {
-    return false;
+    return true;
   }
 
   const path = normalizePath(pathname);
@@ -76,7 +72,6 @@ export default function Header({
   pathname = "/",
   onLogout,
   logoutBusy = false,
-  showConfiguration = false,
   onNavigateStart,
   loaderProgress = 0,
   loaderVisible = false,
@@ -109,18 +104,8 @@ export default function Header({
       key: "my-apps",
       label: "My Apps",
       href: "/dashboard",
-      active: isMyAppsPath(pathname, showConfiguration),
+      active: isMyAppsPath(pathname),
     },
-    ...(showConfiguration
-      ? [
-          {
-            key: "configuration-settings",
-            label: "Configuration & Settings",
-            href: "/setup/admin",
-            active: isConfigurationPath(pathname),
-          },
-        ]
-      : []),
   ];
 
   const activeTab = tabs.find((tab) => tab.active) || tabs[0];

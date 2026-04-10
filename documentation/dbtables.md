@@ -93,7 +93,8 @@ USES:
 RELATED API ROUTES:
 - /api/gutter/setup
 RELATED UI PAGES:
-- /setup/gutter
+- /setup/global
+- /setup/gutter (redirects to /setup/global)
 - /gutter/new
 - /gutter/[id]
 RELATIONSHIPS:
@@ -116,7 +117,8 @@ USES:
 RELATED API ROUTES:
 - /api/gutter/setup
 RELATED UI PAGES:
-- /setup/gutter
+- /setup/global
+- /setup/gutter (redirects to /setup/global)
 - /gutter/new
 - /gutter/[id]
 RELATIONSHIPS:
@@ -185,7 +187,8 @@ USES:
 RELATED API ROUTES:
 - /api/gutter/setup
 RELATED UI PAGES:
-- /setup/gutter
+- /setup/global
+- /setup/gutter (redirects to /setup/global)
 - /gutter/new
 - /gutter/[id]
 RELATIONSHIPS:

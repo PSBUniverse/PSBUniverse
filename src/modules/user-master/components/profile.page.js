@@ -550,9 +550,9 @@ export default function UserProfilePage() {
         </div>
       ) : null}
 
-      <Row className="g-3 align-items-stretch">
-        <Col lg={4}>
-          <Card className="profile-social-card border-0 shadow-sm h-100">
+      <Row className="g-3 align-items-start">
+        <Col lg={4} className="profile-social-col">
+          <Card className="profile-social-card border-0 shadow-sm">
             <Card.Body className="profile-social-card-body">
               <div className="profile-card-actions">
                 {requestUpdateHref ? (

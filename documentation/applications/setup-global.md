@@ -2,6 +2,8 @@
 
 Route: /setup/global
 
+DB Reference Route: /setup/global/dbtables
+
 ## Purpose
 
 Manage shared setup/reference tables used across modules.
@@ -11,6 +13,9 @@ Manage shared setup/reference tables used across modules.
 - core_s_statuses
 - core_s_colors
 - core_s_manufacturers
+- core_s_leaf_guards
+- core_s_discounts
+- core_s_trip_rates
 
 ## Behavior
 
@@ -24,6 +29,6 @@ Manage shared setup/reference tables used across modules.
 
 - Loads each setup dataset through cache-aware select helper.
 - Invalidates table-specific cache key on save.
-- Status updates also invalidate projects:list so gutter list status labels refresh immediately.
+- Status/manufacturer/trip updates also invalidate projects:list so gutter list labels refresh immediately.
 - Forces fresh refetch after save.
 

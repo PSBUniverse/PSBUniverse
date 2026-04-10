@@ -4,24 +4,18 @@ Route: /setup/gutter
 
 ## Purpose
 
-Manage gutter-specific setup reference values.
+Redirect legacy gutter setup route to the unified Core Setup page.
 
 ## Managed Tables
 
-- core_s_leaf_guards
-- core_s_discounts
-- core_s_trip_rates
+- None directly on this route (redirect only).
+- Core setup tables are managed on /setup/global.
 
 ## Behavior
 
-- Editable setup table UI with add, edit, remove, save, and cancel.
-- Save strategy clears and reinserts cleaned rows.
-- Dynamic save/error feedback uses global toasts.
-- Page follows global compact-density UI defaults.
+- Server-side redirect to /setup/global.
 
 ## Cache Integration
 
-- Uses cached reads for all managed setup tables.
-- Invalidates table cache key on save.
-- Forces fresh refetch after save.
+- No direct cache behavior on this route.
 

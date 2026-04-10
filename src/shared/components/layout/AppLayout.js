@@ -23,8 +23,6 @@ const APP_ROUTE_ACCESS_RULES = [
   { prefix: "/gutter", appKey: "gutter-calculator" },
   { prefix: "/travel", appKey: "travel-time" },
   { prefix: "/setup/admin", appKey: "admin-config" },
-  { prefix: "/setup/global", appKey: "admin-config" },
-  { prefix: "/setup/gutter", appKey: "admin-config" },
 ];
 
 function isTrackableApiRequest(input) {
@@ -378,25 +376,6 @@ export default function AppLayout({ children }) {
     return null;
   }
 
-  const roleKeys = Array.isArray(access?.roleKeys)
-    ? access.roleKeys.map((value) => String(value || "").toLowerCase())
-    : [];
-  const appKeys = Array.isArray(access?.appKeys)
-    ? access.appKeys.map((value) => String(value || "").toLowerCase())
-    : [];
-  const appKeyTokens = Array.isArray(access?.appKeyTokens)
-    ? access.appKeyTokens.map((value) => String(value || "").toLowerCase())
-    : [];
-  const hasAdminConfigApp = appKeys.includes("admin-config") || appKeyTokens.includes("adminconfig");
-  const normalizedUserRole = String(user?.role || user?.role_name || "").toLowerCase();
-  const showConfiguration =
-    Boolean(access?.isDevMain) ||
-    roleKeys.includes("devmain") ||
-    roleKeys.includes("admin") ||
-    normalizedUserRole === "devmain" ||
-    normalizedUserRole === "admin" ||
-    hasAdminConfigApp;
-
   return (
     <div className="app-shell">
       <Header
@@ -404,7 +383,6 @@ export default function AppLayout({ children }) {
         user={user}
         onLogout={handleLogout}
         logoutBusy={logoutBusy}
-        showConfiguration={showConfiguration}
         onNavigateStart={startLoader}
         loaderProgress={progress}
         loaderVisible={progressVisible}
