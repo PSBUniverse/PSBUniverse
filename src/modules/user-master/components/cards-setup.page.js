@@ -9,6 +9,10 @@ import {
   USER_MASTER_CACHE_TTL,
 } from "@/modules/user-master/cache/user-master.cache";
 import SetupCardsTab from "@/modules/user-master/components/setup-cards-tab";
+import {
+  compareApplicationsByOrder,
+  resolveApplicationOrder,
+} from "@/shared/utils/application-order";
 import { toastError } from "@/shared/utils/toast";
 
 function hasValue(value) {
@@ -52,14 +56,18 @@ export default function CardsSetupPage() {
   }, [loadReferences]);
 
   const appOptions = useMemo(() => {
-    return (applications || [])
+    const orderedApps = [...(applications || [])]
+      .filter((app) => hasValue(app?.app_id))
+      .sort(compareApplicationsByOrder);
+
+    return orderedApps
       .map((app) => ({
         app_id: app?.app_id,
         app_name: asText(app?.app_name) || `App ${app?.app_id}`,
+        app_order: resolveApplicationOrder(app),
         is_active: app?.is_active !== false,
       }))
-      .filter((app) => hasValue(app.app_id))
-      .sort((a, b) => a.app_name.localeCompare(b.app_name));
+      .filter((app) => hasValue(app.app_id));
   }, [applications]);
 
   useEffect(() => {
@@ -125,7 +133,7 @@ export default function CardsSetupPage() {
                     <span className="setup-side-nav-item-main">
                       <span className="setup-side-nav-item-title">{app.app_name}</span>
                       <span className="setup-side-nav-item-meta">
-                        {app.is_active ? "Active application" : "Inactive application"}
+                        Order {app.app_order} - {app.is_active ? "Active application" : "Inactive application"}
                       </span>
                     </span>
                     <span className="setup-side-nav-item-end">

@@ -8,6 +8,7 @@ import {
   requireActionPermission,
   toErrorResponse,
 } from "@/modules/user-master/services/user-master-route-auth.service";
+import { normalizeRoutePath } from "@/shared/utils/route-path";
 
 const APP_CARD_GROUP_TABLE =
   String(process.env.USER_MASTER_APP_CARD_GROUP_TABLE || "").trim() || "psb_m_appcardgroup";
@@ -254,7 +255,7 @@ function normalizeCard(record) {
     group_id: record?.group_id,
     card_name: asText(record?.card_name),
     card_desc: asText(record?.card_desc),
-    route_path: asText(record?.route_path),
+    route_path: normalizeRoutePath(record?.route_path),
     icon: asText(record?.icon),
     display_order: asNumber(record?.display_order, 0),
     is_active: toBooleanFlag(record?.is_active),
@@ -522,7 +523,7 @@ export async function POST(request) {
         group_id: groupId,
         card_name: asText(body?.card_name || body?.cardName),
         card_desc: asText(body?.card_desc || body?.cardDesc),
-        route_path: asText(body?.route_path || body?.routePath),
+        route_path: normalizeRoutePath(body?.route_path || body?.routePath),
         icon: asText(body?.icon),
         display_order: asNumber(body?.display_order ?? body?.displayOrder, 0),
         is_active: toBooleanFlag(body?.is_active ?? body?.isActive ?? true),
@@ -734,8 +735,14 @@ export async function PATCH(request) {
         updates.card_desc = asText(body.card_desc);
       }
 
-      if (Object.prototype.hasOwnProperty.call(body || {}, "route_path")) {
-        updates.route_path = asText(body.route_path);
+      if (
+        Object.prototype.hasOwnProperty.call(body || {}, "route_path") ||
+        Object.prototype.hasOwnProperty.call(body || {}, "routePath")
+      ) {
+        updates.route_path = normalizeRoutePath(body.route_path ?? body.routePath);
+        if (!hasValue(updates.route_path)) {
+          return toErrorResponse("route_path is required", 400);
+        }
       }
 
       if (Object.prototype.hasOwnProperty.call(body || {}, "icon")) {

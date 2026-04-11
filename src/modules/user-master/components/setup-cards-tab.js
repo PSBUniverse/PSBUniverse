@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, Form, Modal, Spinner, Tab, Table, Tabs } from "react-bootstrap";
 import { toastError, toastSuccess } from "@/shared/utils/toast";
+import { compareApplicationsByOrder } from "@/shared/utils/application-order";
+import { normalizeRoutePath } from "@/shared/utils/route-path";
 import {
   createCacheKey,
   getOrFetchCached,
@@ -135,7 +137,7 @@ function cloneCardRecord(card = {}) {
     app_id: card?.app_id ?? null,
     card_name: asText(card?.card_name),
     card_desc: asText(card?.card_desc),
-    route_path: asText(card?.route_path),
+    route_path: normalizeRoutePath(card?.route_path),
     icon: asText(card?.icon),
     display_order: asNumber(card?.display_order, 0),
     is_active: card?.is_active !== false,
@@ -181,7 +183,7 @@ function toComparableSnapshot(groups = []) {
       group_id: String(card?.group_id ?? ""),
       card_name: asText(card?.card_name),
       card_desc: asText(card?.card_desc),
-      route_path: asText(card?.route_path),
+      route_path: normalizeRoutePath(card?.route_path),
       icon: asText(card?.icon),
       display_order: asNumber(card?.display_order, 0),
       is_active: Boolean(card?.is_active),
@@ -223,14 +225,15 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
   });
 
   const appOptions = useMemo(() => {
-    return (applications || [])
+    return [...(applications || [])]
+      .filter((app) => hasValue(app?.app_id))
+      .sort(compareApplicationsByOrder)
       .map((app) => ({
         app_id: app?.app_id,
         app_name: asText(app?.app_name) || `App ${app?.app_id}`,
         is_active: app?.is_active !== false,
       }))
-      .filter((app) => hasValue(app.app_id))
-      .sort((a, b) => a.app_name.localeCompare(b.app_name));
+      .filter((app) => hasValue(app.app_id));
   }, [applications]);
 
   const scopedRoles = useMemo(() => {
@@ -417,7 +420,9 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         if (!cardIsNew && baselineCard) {
           if (asText(card?.card_name) !== asText(baselineCard?.card_name)) cardChangedColumns.add("card_name");
           if (asText(card?.card_desc) !== asText(baselineCard?.card_desc)) cardChangedColumns.add("card_desc");
-          if (asText(card?.route_path) !== asText(baselineCard?.route_path)) cardChangedColumns.add("route_path");
+          if (normalizeRoutePath(card?.route_path) !== normalizeRoutePath(baselineCard?.route_path)) {
+            cardChangedColumns.add("route_path");
+          }
           if (asText(card?.icon) !== asText(baselineCard?.icon)) cardChangedColumns.add("icon");
           if (asNumber(card?.display_order, 0) !== asNumber(baselineCard?.display_order, 0)) {
             cardChangedColumns.add("display_order");
@@ -518,7 +523,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           return "Every card must have a card name before saving.";
         }
 
-        if (!hasValue(card?.route_path)) {
+        if (!hasValue(normalizeRoutePath(card?.route_path))) {
           return "Every card must have a route path before saving.";
         }
 
@@ -977,7 +982,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         group_id: card?.group_id,
         card_name: asText(card?.card_name),
         card_desc: asText(card?.card_desc),
-        route_path: asText(card?.route_path),
+        route_path: normalizeRoutePath(card?.route_path),
         icon: asText(card?.icon),
         display_order: asNumber(card?.display_order, 0),
         is_active: card?.is_active !== false,
@@ -1010,7 +1015,9 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
         return;
       }
 
-      if (!hasValue(draft.route_path)) {
+      const normalizedRoutePath = normalizeRoutePath(draft.route_path);
+
+      if (!hasValue(normalizedRoutePath)) {
         toastError("Route path is required.", "Setup Cards");
         return;
       }
@@ -1033,7 +1040,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
                   group_id: targetGroupId,
                   card_name: asText(draft.card_name),
                   card_desc: asText(draft.card_desc),
-                  route_path: asText(draft.route_path),
+                  route_path: normalizedRoutePath,
                   icon: asText(draft.icon),
                   display_order: asNumber(draft.display_order, 0),
                   is_active: Boolean(draft.is_active) && Boolean(group?.is_active),
@@ -1070,7 +1077,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
                     group_id: targetGroupId,
                     card_name: asText(draft.card_name),
                     card_desc: asText(draft.card_desc),
-                    route_path: asText(draft.route_path),
+                    route_path: normalizedRoutePath,
                     icon: asText(draft.icon),
                     display_order: asNumber(draft.display_order, 0),
                     is_active: Boolean(draft.is_active) && Boolean(group?.is_active),
@@ -1389,7 +1396,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
             group_id: resolvedGroupId,
             card_name: asText(card.card_name),
             card_desc: asText(card.card_desc),
-            route_path: asText(card.route_path),
+            route_path: normalizeRoutePath(card.route_path),
             icon: asText(card.icon),
             display_order: asNumber(card.display_order, 0),
             is_active: Boolean(card.is_active),
@@ -1407,8 +1414,8 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
           if (asText(card?.card_desc) !== asText(baselineCard?.card_desc)) {
             updates.card_desc = asText(card?.card_desc);
           }
-          if (asText(card?.route_path) !== asText(baselineCard?.route_path)) {
-            updates.route_path = asText(card?.route_path);
+          if (normalizeRoutePath(card?.route_path) !== normalizeRoutePath(baselineCard?.route_path)) {
+            updates.route_path = normalizeRoutePath(card?.route_path);
           }
           if (asText(card?.icon) !== asText(baselineCard?.icon)) {
             updates.icon = asText(card?.icon);
@@ -1767,7 +1774,7 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
                                             <div className="small text-muted">{card.card_desc || "No description"}</div>
                                           </td>
                                           <td className={cardDiff.changedColumns.has("route_path") ? "setup-cell-changed" : ""}>
-                                            {card.route_path || "--"}
+                                            {normalizeRoutePath(card.route_path) || "--"}
                                           </td>
                                           <td className={cardDiff.changedColumns.has("role_ids") ? "setup-cell-changed" : ""}>
                                             {cardRoleNames.length > 0
@@ -1975,10 +1982,10 @@ export default function SetupCardsTab({ applications = [], roles = [] }) {
                 onChange={(event) =>
                   setCardModal((previous) => ({
                     ...previous,
-                    draft: { ...previous.draft, route_path: event.target.value },
+                    draft: { ...previous.draft, route_path: normalizeRoutePath(event.target.value) },
                   }))
                 }
-                placeholder="/quotes"
+                placeholder="/setup/admin/cards"
               />
             </Form.Group>
 

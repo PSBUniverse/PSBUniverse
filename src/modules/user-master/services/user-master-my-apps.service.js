@@ -7,6 +7,8 @@ import {
   getAuthenticatedContext,
   toErrorResponse,
 } from "@/modules/user-master/services/user-master-route-auth.service";
+import { compareApplicationsByOrder } from "@/shared/utils/application-order";
+import { normalizeRoutePath } from "@/shared/utils/route-path";
 
 const APP_CARD_GROUP_TABLE =
   String(process.env.USER_MASTER_APP_CARD_GROUP_TABLE || "").trim() || "psb_m_appcardgroup";
@@ -80,7 +82,7 @@ function normalizeCard(record) {
     app_id: asText(getField(record, ["app_id", "application_id"])),
     card_name: asText(getField(record, ["card_name", "name", "label"], "Card")) || "Card",
     card_desc: asText(getField(record, ["card_desc", "description"], "")),
-    route_path: asText(getField(record, ["route_path", "route", "path", "href"], "")),
+    route_path: normalizeRoutePath(getField(record, ["route_path", "route", "path", "href"], "")),
     icon: asText(getField(record, ["icon"], "")),
     display_order: asNumber(getField(record, ["display_order", "card_order", "sort_order", "order_no"], 0)) ?? 0,
     is_active: isMappingActive(record),
@@ -213,7 +215,7 @@ async function getActiveUserAppRoles({ supabaseClient, userId, appId }) {
   ] = await Promise.all([
     supabaseClient
       .from(USER_MASTER_TABLES.applications)
-      .select(`${USER_MASTER_COLUMNS.appId}`)
+      .select("*")
       .in(USER_MASTER_COLUMNS.appId, candidateAppIds)
       .eq("is_active", true),
     supabaseClient
@@ -226,15 +228,17 @@ async function getActiveUserAppRoles({ supabaseClient, userId, appId }) {
   if (appError) throw new Error(appError.message || "Unable to load applications");
   if (roleError) throw new Error(roleError.message || "Unable to load roles");
 
-  const activeAppSet = new Set(
-    uniqueTextValues((activeApps || []).map((row) => row?.[USER_MASTER_COLUMNS.appId]))
+  const orderedActiveApps = [...(activeApps || [])].sort(compareApplicationsByOrder);
+  const orderedActiveAppIds = uniqueTextValues(
+    orderedActiveApps.map((row) => row?.[USER_MASTER_COLUMNS.appId])
   );
+  const activeAppSet = new Set(orderedActiveAppIds);
 
   const activeRoleSet = new Set(
     uniqueTextValues((activeRoles || []).map((row) => row?.[USER_MASTER_COLUMNS.roleId]))
   );
 
-  const effectiveAppSet = new Set(
+  const mappedActiveAppSet = new Set(
     uniqueTextValues(activeRoleRows.map((row) => row.app_id)).filter((mappedAppId) =>
       activeAppSet.has(mappedAppId)
     )
@@ -242,12 +246,13 @@ async function getActiveUserAppRoles({ supabaseClient, userId, appId }) {
 
   const roleIdsByApp = new Map();
 
-  for (const appIdValue of effectiveAppSet) {
+  for (const appIdValue of orderedActiveAppIds) {
+    if (!mappedActiveAppSet.has(appIdValue)) continue;
     roleIdsByApp.set(appIdValue, new Set());
   }
 
   for (const mapping of activeRoleRows) {
-    if (!effectiveAppSet.has(mapping.app_id)) continue;
+    if (!mappedActiveAppSet.has(mapping.app_id)) continue;
 
     if (!activeRoleSet.has(mapping.role_id)) {
       continue;
@@ -260,7 +265,7 @@ async function getActiveUserAppRoles({ supabaseClient, userId, appId }) {
     roleIdsByApp.get(mapping.app_id).add(mapping.role_id);
   }
 
-  const appIds = Array.from(effectiveAppSet);
+  const appIds = orderedActiveAppIds.filter((value) => mappedActiveAppSet.has(value));
   const appsWithoutModules = appIds.filter((resolvedAppId) => {
     const roleSet = roleIdsByApp.get(resolvedAppId);
     return !(roleSet instanceof Set) || roleSet.size === 0;

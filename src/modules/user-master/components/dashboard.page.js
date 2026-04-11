@@ -5,6 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { Container, Row, Col, Card } from "react-bootstrap";
 import psbLogo from "@/styles/psb_logo_notitle.png";
+import { normalizeRoutePath } from "@/shared/utils/route-path";
 import { createCacheKey, getOrFetchCached } from "@/core/cache/adapters/browser-cache.adapter";
 
 const DEFAULT_CARD_ICON = "bi-grid-3x3-gap";
@@ -45,7 +46,7 @@ function normalizeGroups(payload) {
       card_id: card?.card_id,
       card_name: String(card?.card_name || "Module").trim(),
       card_desc: String(card?.description || card?.card_desc || "").trim(),
-      route_path: String(card?.route || card?.route_path || "").trim(),
+      route_path: normalizeRoutePath(card?.route || card?.route_path || ""),
       icon: String(card?.icon || "").trim(),
     })),
   }));

@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { createCacheKey, invalidateCacheKey } from "@/core/cache";
 import {
   Badge,
   Button,
@@ -30,12 +31,19 @@ import {
   notifyUserMasterSessionRefresh,
 } from "@/modules/user-master/cache/user-master.query";
 import { useUserAccess } from "@/modules/user-master/hooks/useUserAccess";
+import {
+  compareApplicationsByOrder,
+  resolveApplicationOrder,
+} from "@/shared/utils/application-order";
 import { toastError, toastInfo, toastSuccess, toastWarning } from "@/shared/utils/toast";
 import { startNavbarLoader } from "@/shared/utils/navbar-loader";
 
 const ADMIN_APP_KEY = "admin-config";
 const ADMIN_MAIN_TABS = ["users", "companies", "statuses", "applications"];
 const TEMP_ID_PREFIX = "tmp-";
+const APPLICATION_ORDER_FIELDS = ["display_order", "app_order", "sort_order", "order_no"];
+const MY_APPS_CACHE_NAMESPACE = "user-master";
+const MY_APPS_CACHE_KEY = createCacheKey("my-apps", "dashboard");
 
 const DEFAULT_DIFF_ENTRY = {
   isNew: false,
@@ -102,6 +110,53 @@ function cloneBatchRows(rows) {
   return (Array.isArray(rows) ? rows : []).map((row) => ({
     ...(row || {}),
     __pendingRemove: false,
+  }));
+}
+
+function moveArrayItem(items, sourceIndex, targetIndex) {
+  const nextItems = Array.isArray(items) ? [...items] : [];
+  if (
+    sourceIndex < 0 ||
+    targetIndex < 0 ||
+    sourceIndex >= nextItems.length ||
+    targetIndex >= nextItems.length ||
+    sourceIndex === targetIndex
+  ) {
+    return nextItems;
+  }
+
+  const [moved] = nextItems.splice(sourceIndex, 1);
+  nextItems.splice(targetIndex, 0, moved);
+  return nextItems;
+}
+
+function resequenceApplicationRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row, index) => ({
+    ...(row || {}),
+    display_order: index + 1,
+  }));
+}
+
+function detectApplicationOrderField(rows) {
+  const records = Array.isArray(rows) ? rows : [];
+
+  for (const field of APPLICATION_ORDER_FIELDS) {
+    if (records.some((row) => Object.prototype.hasOwnProperty.call(row || {}, field))) {
+      return field;
+    }
+  }
+
+  return "";
+}
+
+function normalizeApplicationRows(rows) {
+  const ordered = [...(Array.isArray(rows) ? rows : [])]
+    .filter((row) => hasValue(row?.app_id))
+    .sort(compareApplicationsByOrder);
+
+  return ordered.map((row, index) => ({
+    ...(row || {}),
+    display_order: resolveApplicationOrder(row, index + 1),
   }));
 }
 
@@ -257,6 +312,7 @@ function emptyApplicationDraft() {
     app_id: null,
     app_name: "",
     app_desc: "",
+    display_order: 1,
     is_active: true,
   };
 }
@@ -305,6 +361,11 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
     applications: [],
   });
   const [selectedApplicationId, setSelectedApplicationId] = useState("");
+  const [applicationDragContext, setApplicationDragContext] = useState({
+    sourceAppId: "",
+    targetAppId: "",
+  });
+  const [applicationOrderField, setApplicationOrderField] = useState("");
   const [applicationRoles, setApplicationRoles] = useState([]);
   const [loadingApplicationRoles, setLoadingApplicationRoles] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState(null);
@@ -516,6 +577,7 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
       buildBatchDiff(references.applications, batchBaseline.applications, "app_id", [
         "app_name",
         "app_desc",
+        { key: "display_order", type: "number" },
         { key: "is_active", type: "boolean" },
       ]),
     [batchBaseline.applications, references.applications]
@@ -687,6 +749,7 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
             roles: [],
             applications: [],
           });
+          setApplicationOrderField("");
           setUsers([]);
           setMappings([]);
           return;
@@ -731,6 +794,11 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
           ]);
         }
 
+        const rawApplications = Array.isArray(bootstrapPayload.applications)
+          ? bootstrapPayload.applications
+          : [];
+        setApplicationOrderField(detectApplicationOrderField(rawApplications));
+
         const nextReferences = {
           companies: bootstrapPayload.companies || [],
           departments: bootstrapPayload.departments || [],
@@ -741,7 +809,7 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
             bootstrapPayload.statuses ||
             [],
           roles: bootstrapPayload.roles || [],
-          applications: bootstrapPayload.applications || [],
+          applications: normalizeApplicationRows(rawApplications),
         };
 
         const nextUsers = usersPayload.users || [];
@@ -756,7 +824,7 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
           users: cloneBatchRows(nextUsers),
           companies: cloneBatchRows(nextReferences.companies),
           statuses: cloneBatchRows(nextReferences.statuses),
-          applications: cloneBatchRows(nextReferences.applications),
+          applications: normalizeApplicationRows(cloneBatchRows(nextReferences.applications)),
         });
       } catch (error) {
         const statusCode = Number(error?.status || error?.payload?.status || 0);
@@ -945,12 +1013,14 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
 
     setReferences((previous) => ({
       ...previous,
-      applications: cloneBatchRows(batchBaseline.applications),
+      applications: normalizeApplicationRows(cloneBatchRows(batchBaseline.applications)),
     }));
 
     if (isTempId(selectedApplicationId)) {
       setSelectedApplicationId("");
     }
+
+    setApplicationDragContext({ sourceAppId: "", targetAppId: "" });
 
     closeApplicationModal();
     setInfo("Staged application changes discarded.", "success");
@@ -960,6 +1030,80 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
     selectedApplicationId,
     setInfo,
   ]);
+
+  const clearApplicationDragContext = useCallback(() => {
+    setApplicationDragContext({ sourceAppId: "", targetAppId: "" });
+  }, []);
+
+  const handleApplicationDragStart = useCallback((appId, event) => {
+    const sourceAppId = String(appId || "");
+    if (!hasValue(sourceAppId) || busy) return;
+
+    if (event?.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", sourceAppId);
+    }
+
+    setApplicationDragContext({
+      sourceAppId,
+      targetAppId: "",
+    });
+  }, [busy]);
+
+  const handleApplicationDragOver = useCallback((targetAppId, event) => {
+    const targetId = String(targetAppId || "");
+    const sourceId = String(applicationDragContext.sourceAppId || "");
+    if (!hasValue(targetId) || !hasValue(sourceId) || sourceId === targetId) return;
+
+    event.preventDefault();
+    if (event?.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+
+    setApplicationDragContext((previous) =>
+      previous.targetAppId === targetId
+        ? previous
+        : {
+            ...previous,
+            targetAppId: targetId,
+          }
+    );
+  }, [applicationDragContext.sourceAppId]);
+
+  const handleApplicationDrop = useCallback((targetAppId, event) => {
+    event.preventDefault();
+
+    const sourceId = String(applicationDragContext.sourceAppId || "");
+    const targetId = String(targetAppId || "");
+
+    if (!hasValue(sourceId) || !hasValue(targetId) || sourceId === targetId) {
+      clearApplicationDragContext();
+      return;
+    }
+
+    setReferences((previous) => {
+      const currentApplications = Array.isArray(previous.applications) ? previous.applications : [];
+      const sourceIndex = currentApplications.findIndex(
+        (application) => String(application?.app_id || "") === sourceId
+      );
+      const targetIndex = currentApplications.findIndex(
+        (application) => String(application?.app_id || "") === targetId
+      );
+
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return previous;
+      }
+
+      const reorderedApplications = moveArrayItem(currentApplications, sourceIndex, targetIndex);
+
+      return {
+        ...previous,
+        applications: normalizeApplicationRows(resequenceApplicationRows(reorderedApplications)),
+      };
+    });
+
+    clearApplicationDragContext();
+  }, [applicationDragContext.sourceAppId, clearApplicationDragContext]);
 
   const saveUsersBatch = useCallback(async () => {
     if (!usersDiff.hasPendingChanges) return;
@@ -1239,66 +1383,121 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
     setFeedback({ text: "", variant: "info" });
 
     try {
+      let resolvedApplicationOrderField = applicationOrderField;
+
+      if (!hasValue(resolvedApplicationOrderField)) {
+        const response = await fetch(
+          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+          {
+            method: "GET",
+            cache: "no-store",
+          }
+        );
+
+        const payload = await response.json().catch(() => ({}));
+
+        if (response.ok && payload?.success !== false) {
+          resolvedApplicationOrderField =
+            String(payload?.applicationOrderField || payload?.data?.applicationOrderField || "").trim() ||
+            "";
+
+          if (!hasValue(resolvedApplicationOrderField)) {
+            const sourceApplications = Array.isArray(payload?.applications)
+              ? payload.applications
+              : Array.isArray(payload?.data?.applications)
+              ? payload.data.applications
+              : [];
+
+            resolvedApplicationOrderField = detectApplicationOrderField(sourceApplications);
+          }
+
+          if (hasValue(resolvedApplicationOrderField)) {
+            setApplicationOrderField(resolvedApplicationOrderField);
+          }
+        }
+      }
+
       const draftApplications = references.applications || [];
       const baselineById = new Map(
         (batchBaseline.applications || []).map((row) => [String(row?.app_id), row])
       );
 
-      for (const application of draftApplications) {
-        const appId = String(application?.app_id || "");
-        if (!application?.__pendingRemove || !baselineById.has(appId)) {
-          continue;
+      const activeApplications = draftApplications.filter((application) => !application?.__pendingRemove);
+      const seenOrderValues = new Set();
+
+      for (const application of activeApplications) {
+        const displayOrder = toNullableNumber(application?.display_order);
+        if (displayOrder === null || displayOrder <= 0) {
+          throw new Error("Application order must be a positive number before saving batch.");
         }
 
-        await callApi(
-          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}&app_id=${encodeURIComponent(application.app_id)}`,
-          "DELETE"
+        const orderKey = String(displayOrder);
+        if (seenOrderValues.has(orderKey)) {
+          throw new Error(`Duplicate application order ${displayOrder} detected. Please make orders unique.`);
+        }
+
+        seenOrderValues.add(orderKey);
+      }
+
+      if (!hasValue(resolvedApplicationOrderField)) {
+        const attemptedOrderChange = activeApplications.some((application) => {
+          const appId = String(application?.app_id || "");
+          if (isTempId(appId)) return false;
+
+          const baselineApplication = baselineById.get(appId);
+          if (!baselineApplication) return false;
+
+          return (
+            normalizeBatchValue(application?.display_order, "number") !==
+            normalizeBatchValue(baselineApplication?.display_order, "number")
+          );
+        });
+
+        if (attemptedOrderChange) {
+          throw new Error(
+            "Application ordering cannot be saved because no order column was detected on applications. Add one of: display_order, app_order, sort_order, order_no. Run migrations: supabase/migrations/202604110001_add_application_display_order.sql and supabase/migrations/202604110002_add_applications_batch_rpc.sql"
+          );
+        }
+      }
+
+      if (resolvedApplicationOrderField !== "display_order") {
+        throw new Error(
+          `Batch save optimization requires display_order. Detected: ${resolvedApplicationOrderField}`
         );
       }
 
-      for (const application of draftApplications) {
-        if (application?.__pendingRemove) continue;
+      const batchPayloadRows = draftApplications.map((application) => {
+        const appId = isTempId(application?.app_id)
+          ? null
+          : toNullableNumber(application?.app_id);
 
-        const appId = String(application?.app_id || "");
-        const baselineApplication = baselineById.get(appId);
-        const isNew = isTempId(appId) || !baselineApplication;
-        const rowDiff = applicationsDiff.byId.get(appId) || DEFAULT_DIFF_ENTRY;
-
-        const payload = {
+        return {
+          app_id: appId,
           app_name: String(application?.app_name || "").trim() || null,
           app_desc: String(application?.app_desc || "").trim() || null,
           is_active: Boolean(application?.is_active),
+          display_order: toNullableNumber(application?.display_order),
+          is_pending_remove: Boolean(application?.__pendingRemove),
         };
+      });
 
-        if (!payload.app_name) {
-          throw new Error("Application name is required before saving batch.");
+      await callApi(
+        `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
+        "POST",
+        {
+          mode: "batch",
+          order_field: "display_order",
+          applications: batchPayloadRows,
         }
-
-        if (isNew) {
-          await callApi(
-            `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-            "POST",
-            payload
-          );
-          continue;
-        }
-
-        if (!rowDiff.isChanged) continue;
-
-        await callApi(
-          `/api/user-master/admin/applications?appKey=${encodeURIComponent(ADMIN_APP_KEY)}`,
-          "PATCH",
-          {
-            app_id: application.app_id,
-            ...payload,
-          }
-        );
-      }
+      );
 
       invalidateUserMasterCache([
         USER_MASTER_CACHE_KEYS.bootstrap,
         USER_MASTER_CACHE_KEYS.mappings,
       ]);
+      invalidateCacheKey(MY_APPS_CACHE_KEY, {
+        namespace: MY_APPS_CACHE_NAMESPACE,
+      });
       await loadData({ forceFresh: true });
       setInfo("Applications batch saved.", "success");
     } catch (error) {
@@ -1307,10 +1506,12 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
       setBusy(false);
     }
   }, [
+    applicationOrderField,
     applicationsDiff,
     batchBaseline.applications,
     loadData,
     references.applications,
+    setApplicationOrderField,
     setError,
     setInfo,
   ]);
@@ -1502,7 +1703,9 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
 
       return {
         ...previous,
-        applications: found ? nextApplications : [nextApplication, ...nextApplications],
+        applications: normalizeApplicationRows(
+          found ? nextApplications : [nextApplication, ...nextApplications]
+        ),
       };
     });
   }, []);
@@ -2328,10 +2531,19 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
   }
 
   function openCreateApplicationModal() {
+    const nextDisplayOrder =
+      (references.applications || []).reduce(
+        (max, item) => Math.max(max, toNullableNumber(item?.display_order) ?? 0),
+        0
+      ) + 1;
+
     setApplicationModal({
       show: true,
       mode: "create",
-      draft: emptyApplicationDraft(),
+      draft: {
+        ...emptyApplicationDraft(),
+        display_order: nextDisplayOrder,
+      },
     });
   }
 
@@ -2343,6 +2555,7 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
         app_id: application.app_id,
         app_name: application.app_name || "",
         app_desc: application.app_desc || "",
+        display_order: toNullableNumber(application.display_order) ?? resolveApplicationOrder(application, 1),
         is_active: application.is_active !== false,
       },
     });
@@ -2361,9 +2574,16 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
       return;
     }
 
+    const displayOrder = toNullableNumber(draft.display_order);
+    if (displayOrder === null || displayOrder <= 0) {
+      setError("Application order must be a positive number.");
+      return;
+    }
+
     const stagedPayload = {
       app_name: String(draft.app_name || "").trim(),
       app_desc: String(draft.app_desc || "").trim() || null,
+      display_order: displayOrder,
       is_active: Boolean(draft.is_active),
       __pendingRemove: false,
     };
@@ -2372,19 +2592,24 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
       const tempAppId = createTempId("application");
       setReferences((previous) => ({
         ...previous,
-        applications: [{ app_id: tempAppId, ...stagedPayload }, ...(previous.applications || [])],
+        applications: normalizeApplicationRows([
+          { app_id: tempAppId, ...stagedPayload },
+          ...(previous.applications || []),
+        ]),
       }));
       setInfo("Application creation staged. Save Batch to apply.", "success");
     } else {
       setReferences((previous) => ({
         ...previous,
-        applications: (previous.applications || []).map((item) =>
-          String(item.app_id) === String(draft.app_id)
-            ? {
-                ...item,
-                ...stagedPayload,
-              }
-            : item
+        applications: normalizeApplicationRows(
+          (previous.applications || []).map((item) =>
+            String(item.app_id) === String(draft.app_id)
+              ? {
+                  ...item,
+                  ...stagedPayload,
+                }
+              : item
+          )
         ),
       }));
       setInfo("Application update staged. Save Batch to apply.", "success");
@@ -2396,8 +2621,10 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
   async function deactivateApplication(appId) {
     setReferences((previous) => ({
       ...previous,
-      applications: (previous.applications || []).map((item) =>
-        String(item.app_id) === String(appId) ? { ...item, is_active: false } : item
+      applications: normalizeApplicationRows(
+        (previous.applications || []).map((item) =>
+          String(item.app_id) === String(appId) ? { ...item, is_active: false } : item
+        )
       ),
     }));
 
@@ -2407,8 +2634,10 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
   async function activateApplication(appId) {
     setReferences((previous) => ({
       ...previous,
-      applications: (previous.applications || []).map((item) =>
-        String(item.app_id) === String(appId) ? { ...item, is_active: true } : item
+      applications: normalizeApplicationRows(
+        (previous.applications || []).map((item) =>
+          String(item.app_id) === String(appId) ? { ...item, is_active: true } : item
+        )
       ),
     }));
 
@@ -2709,8 +2938,10 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
         if (isTempId(id)) {
           setReferences((previous) => ({
             ...previous,
-            applications: (previous.applications || []).filter(
-              (item) => String(item.app_id) !== String(id)
+            applications: normalizeApplicationRows(
+              (previous.applications || []).filter(
+                (item) => String(item.app_id) !== String(id)
+              )
             ),
           }));
           closeRemoveModal();
@@ -2720,13 +2951,15 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
 
         setReferences((previous) => ({
           ...previous,
-          applications: (previous.applications || []).map((item) =>
-            String(item.app_id) !== String(id)
-              ? item
-              : {
-                  ...item,
-                  __pendingRemove: !Boolean(item.__pendingRemove),
-                }
+          applications: normalizeApplicationRows(
+            (previous.applications || []).map((item) =>
+              String(item.app_id) !== String(id)
+                ? item
+                : {
+                    ...item,
+                    __pendingRemove: !Boolean(item.__pendingRemove),
+                  }
+            )
           ),
         }));
 
@@ -3545,11 +3778,15 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
                   </div>
                 </Card.Header>
                 <Card.Body>
+                  <div className="small text-muted mb-2">
+                    Drag the grip icon in Actions to reorder applications.
+                  </div>
                   <Table size="sm" bordered hover className="admin-data-table mb-0">
                     <thead>
                       <tr>
                         <th>Actions</th>
                         <th>Application Name</th>
+                        <th>Order</th>
                         <th>Description</th>
                         <th>Active</th>
                       </tr>
@@ -3558,6 +3795,10 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
                       {(references.applications || []).map((application) => {
                         const appId = String(application.app_id || "");
                         const applicationDiff = applicationsDiff.byId.get(appId) || DEFAULT_DIFF_ENTRY;
+                        const isDropTarget =
+                          hasValue(applicationDragContext.sourceAppId) &&
+                          applicationDragContext.sourceAppId !== appId &&
+                          applicationDragContext.targetAppId === appId;
                         const rowStateClass = applicationDiff.isPendingRemove
                           ? "admin-row-pending-remove"
                           : applicationDiff.isNew
@@ -3571,14 +3812,39 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
                           key={appId}
                           className={`${
                             String(selectedApplicationId || "") === appId ? "admin-row-selected" : ""
-                          } ${rowStateClass}`}
+                          } ${rowStateClass} ${isDropTarget ? "table-primary" : ""}`}
                           onClick={() => {
                             if (applicationDiff.isPendingRemove) return;
                             setSelectedApplicationId(asSelectValue(application.app_id));
                           }}
+                          onDragOver={(event) => {
+                            if (applicationDiff.isPendingRemove) return;
+                            handleApplicationDragOver(appId, event);
+                          }}
+                          onDrop={(event) => {
+                            if (applicationDiff.isPendingRemove) return;
+                            handleApplicationDrop(appId, event);
+                          }}
                         >
                           <td>
                             <div className="d-flex gap-1">
+                              <span
+                                className={`d-inline-flex align-items-center justify-content-center border rounded px-1 ${
+                                  busy || applicationDiff.isPendingRemove ? " text-muted" : ""
+                                }`}
+                                draggable={!busy && !applicationDiff.isPendingRemove}
+                                onDragStart={(event) => handleApplicationDragStart(appId, event)}
+                                onDragEnd={clearApplicationDragContext}
+                                title={
+                                  applicationDiff.isPendingRemove
+                                    ? "Undo remove to reorder"
+                                    : "Drag to reorder"
+                                }
+                                aria-label="Drag to reorder"
+                                style={{ cursor: busy || applicationDiff.isPendingRemove ? "not-allowed" : "grab" }}
+                              >
+                                <i className="bi bi-grip-vertical" aria-hidden="true" />
+                              </span>
                               <Button
                                 type="button"
                                 size="sm"
@@ -3658,6 +3924,9 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
                           </td>
                           <td className={applicationDiff.changedColumns.has("app_name") ? "admin-cell-changed" : ""}>
                             {application.app_name || "--"}
+                          </td>
+                          <td className={applicationDiff.changedColumns.has("display_order") ? "admin-cell-changed" : ""}>
+                            {toNullableNumber(application.display_order) ?? "--"}
                           </td>
                           <td className={applicationDiff.changedColumns.has("app_desc") ? "admin-cell-changed" : ""}>
                             {application.app_desc || "--"}
@@ -4837,6 +5106,24 @@ export default function AdminUserMasterPage({ forcedTab = null }) {
                   setApplicationModal((prev) => ({
                     ...prev,
                     draft: { ...prev.draft, app_desc: event.target.value },
+                  }))
+                }
+              />
+            </Form.Group>
+
+            <Form.Group className="mb-3">
+              <Form.Label>Order</Form.Label>
+              <Form.Control
+                type="number"
+                min={1}
+                value={applicationModal.draft.display_order}
+                onChange={(event) =>
+                  setApplicationModal((prev) => ({
+                    ...prev,
+                    draft: {
+                      ...prev.draft,
+                      display_order: toNullableNumber(event.target.value) ?? 1,
+                    },
                   }))
                 }
               />
