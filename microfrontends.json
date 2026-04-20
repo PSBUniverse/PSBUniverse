@@ -7,7 +7,7 @@
           "group": "psb-gutter-app",
           "paths": [
             "/gutter",
-            "/gutter/*"
+            "/gutter/:path*"
           ]
         }
       ]
