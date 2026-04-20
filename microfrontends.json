@@ -1,6 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/microfrontends.json",
   "applications": {
+        "psbuniverse-dev": {
+      "development": {
+        "fallback": "psbuniverse-dev.vercel.app"
+      }
+    },
     "psb-gutter-app": {
       "routing": [
         {
