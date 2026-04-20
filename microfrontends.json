@@ -9,7 +9,6 @@
     "psb-gutter-app": {
       "routing": [
         {
-          "group": "psb-gutter-app",
           "paths": [
             "/gutter",
             "/gutter/:path*"
