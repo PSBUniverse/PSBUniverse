@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/microfrontends.json",
+  "applications": {
+    "psb-gutter-app": {
+      "routing": [
+        {
+          "group": "psb-gutter-app",
+          "paths": [
+            "/gutter",
+            "/gutter/*"
+          ]
+        }
+      ]
+    }
+  }
+}
